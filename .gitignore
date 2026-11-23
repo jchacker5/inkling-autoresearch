@@ -6,3 +6,4 @@ lanes/
 *.safetensors
 results/ledger.tsv
 results/*.log
+.pytest_cache/

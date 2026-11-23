@@ -23,7 +23,10 @@ In-context retrieval, the circuit the reasoning task needs, only emerges after t
 for the fixed 5 minutes with your modification. Consequences:
 
 - New modules must start as a no-op (zero-init output projections, gates that start closed) so the base
-  is not damaged on step 1. Every switch in `train.py` already does this.
+  is not damaged on step 1. `DEPTH_ATTN`, `HISTORY` and `LOOP_EMBED` do this (checked by
+  `tests/test_model.py`). `HALTING` and `KV_SHARE` change the computation itself, so they start
+  slightly off the base and rely on the 5 minutes to adapt.
+- Run `uv run pytest -q` after editing `train.py`. Add any new switch to `CASES` in `tests/test_model.py`.
 - The backbone shape (`D_MODEL`, `N_HEADS`, `PRELUDE`/`CORE`/`CODA`, MLP size) is fixed by the base.
   `train.py` refuses a mismatched load. Shape changes need `INIT_FROM_BASE = False`, which is only fair
   against a from-scratch control (recipe lane).

@@ -9,6 +9,9 @@
 #      MODEL (default: CLI default)    e.g. claude-opus-5-5
 #      DRY_RUN=1                       print what would run, create nothing
 #
+# SECURITY: agents run with --dangerously-skip-permissions (no prompts). Run the swarm on a machine or
+# user account you are willing to hand to an autonomous agent.
+#
 # Training is serialized by swarm/run.py, so N lanes give N-way parallel *thinking*, not N-way training.
 # Roughly 10-11 experiments per hour in total, however many lanes run. 3 lanes is a good default.
 set -euo pipefail
@@ -47,5 +50,6 @@ Before you exit, append what you learned and your next 3 ideas to results/notes-
   echo "launched $lane (pid $!) -> results/agent-$lane.log"
   sleep 5
 done
-echo "watch: uv run swarm/status.py   |   tail -f results/agent-*.log   |   stop: pkill -f 'inkling-autoresearch swarm'"
+echo "watch: uv run swarm/status.py   |   tail -f results/agent-*.log"
+echo "stop:  pkill -f swarm/launch.sh; pkill -f 'inkling-autoresearch swarm'   (launcher loops first, then agents)"
 wait

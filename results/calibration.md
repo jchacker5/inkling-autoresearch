@@ -47,6 +47,18 @@ Fused attention matches a manual implementation (max diff 6e-7). RoPE dot produc
 position-invariant. With matched settings this repo's model matches an independent reference, so there
 is no bug. Retrieval just emerges slowly, and LR above about 1e-3 hurts it.
 
+## Base pretraining progress (`pretrain_base.py`, LR 1e-3, 100 problems per hop)
+
+| training | steps | val_bpb | hop 0 | hop 1 | hop 2 | hop 4 | hop 6 | hop 8 |
+|---|---|---|---|---|---|---|---|---|
+| 15 min | 763 | 2.0792 | 0.33 | 0.52 | 0.35 | 0.29 | 0.27 | 0.11 |
+| 30 min | 1,522 | 1.9306 | 0.43 | 0.54 | 0.41 | 0.39 | 0.24 | 0.16 |
+| 45 min | 2,277 | 1.7986 | 0.40 | 0.49 | 0.42 | 0.41 | 0.33 | 0.18 |
+
+Retrieval emerges within the first 15 minutes (about 750 steps) once training continues past the
+5-minute window. The first run was killed by a signal after the 45-minute checkpoint; it was resumed
+with `--resume` (weights kept, AdamW state and data stream restarted).
+
 ## Decision
 
 Two stages: train the looped backbone once for hours (`pretrain_base.py`, LR 1e-3, hops 0-6 curriculum

@@ -1,0 +1,17 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-14          # Apple Silicon; MLX has no Linux GPU path we rely on
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+      - run: uv run pytest -q
+      - name: Syntax-check scripts
+        run: uv run python -m py_compile prepare.py train.py pretrain_base.py swarm/run.py swarm/status.py
