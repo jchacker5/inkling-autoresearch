@@ -1,0 +1,40 @@
+\section{Related work}
+
+\paragraph{Looped and weight-shared transformers.} Universal Transformers apply one block repeatedly
+with adaptive halting~\citep{dehghani2019universal}; ALBERT shares parameters across layers to save
+memory~\citep{lan2020albert}. Looped transformers can emulate programs~\citep{giannou2023looped}, and
+looping a few layers can match much deeper models on reasoning~\citep{saunshi2025reasoning}. Relaxed
+recursive transformers convert pre-trained models into looped ones with layer-wise
+LoRA~\citep{bae2025relaxed}. Huginn trains a 3.5B recurrent-depth model with a randomized number of
+iterations so that test-time compute can be scaled~\citep{geiping2025scaling}, and Ouro pre-trains
+looped language models at scale~\citep{zhu2025ouro}. Deep equilibrium models take the limit of
+infinite depth through fixed points~\citep{bai2019deep}.
+
+\paragraph{Adaptive computation.} ACT~\citep{graves2016adaptive} and PonderNet~\citep{banino2021pondernet}
+learn when to stop; Mixture-of-Depths routes tokens around layers~\citep{raposo2024mixture};
+Mixture-of-Recursions learns a per-token recursion depth in a looped model~\citep{bae2025mixture}, and
+recent work studies where recurrent compute should be spent~\citep{lin2026allocating}.
+
+\paragraph{What to recur over, and what to cache.} ARLoop replaces residual connections in a looped
+model with attention over earlier depths~\citep{yao2026arloop}. ``Rethinking at fixed points'' argues
+that once states converge, the final iteration's KV cache can be shared, cutting KV memory about
+threefold~\citep{huang2026looped}; KV replay lets only selected iterations write KV
+states~\citep{licakova2026kvreplay}. History-state injection with loop-index conditioning is proposed to
+stop knowledge from degrading when a looped model is unrolled further than it was
+trained~\citep{zhuang2026recurrence}. LoopFold runs loop iterations in parallel by predicting and
+correcting later states~\citep{song2026loopfold}, and linear-time looped models replace attention in the
+loop~\citep{deng2026lt2}.
+
+\paragraph{Probing reasoning and recall.} Our task is a dense version of RULER's variable
+tracking~\citep{hsieh2024ruler}; associative recall~\citep{arora2024zoology} and induction
+heads~\citep{olsson2022context} explain why retrieval appears late in training.
+
+\paragraph{Automated research.} Karpathy's autoresearch has an agent edit one training file, train for
+five minutes, keep or discard by validation loss, and repeat~\citep{karpathy2026autoresearch}. We extend
+it to several agents working different hypotheses, to two metrics with an explicit trade-off rule, and
+to seed-calibrated decisions.
+
+\paragraph{How this paper relates.} The 2026 methods above were evaluated at 0.5--3.5B parameters on
+GPU clusters. Our implementations are first-pass versions written from short descriptions of those
+methods, at 7.3M parameters, and they are not reproductions; where a lane is named after a paper, it
+tests the idea, not the paper's exact architecture.

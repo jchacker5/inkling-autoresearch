@@ -1,0 +1,44 @@
+\section{Introduction}
+
+On a phone, a laptop, a car or a robot, the binding constraint for a language model is usually memory,
+not arithmetic. The weights and the key--value (KV) cache have to fit in DRAM next to everything else
+the device runs, and batch-1 decoding is limited by how fast those bytes can be streamed, not by FLOPs.
+A model that buys capability with \emph{compute} instead of \emph{parameters} is therefore attractive at
+the edge: the same weights, applied more times, cost time but no extra memory.
+
+Looped (recurrent-depth, weight-shared) transformers do exactly this. A block of layers is applied
+repeatedly, so effective depth grows while the parameter count stays fixed
+\citep{dehghani2019universal,lan2020albert,giannou2023looped,saunshi2025reasoning}. Recent work scales
+the idea to billions of parameters \citep{geiping2025scaling,zhu2025ouro}, lets each token choose its
+own depth \citep{bae2025mixture,graves2016adaptive,banino2021pondernet}, attends across depth
+\citep{yao2026arloop}, shares or replays KV caches across loops
+\citep{huang2026looped,licakova2026kvreplay}, and asks which design choices make recurrence work at all
+\citep{zhuang2026recurrence}. This paper asks the edge version of the question:
+
+\begin{quote}
+\emph{Can a compact recurrent language model learn to allocate its own computation and achieve better
+reasoning per byte of memory than a conventional transformer?}
+\end{quote}
+
+We study it at the smallest scale where it is still meaningful (a 7.3M-parameter byte-level model,
+about 14\,MB of weights in bf16) on a single 32\,GB Apple M4 laptop, and we let an autonomous swarm of
+AI agents do most of the architecture search, in the style of Karpathy's
+autoresearch~\citep{karpathy2026autoresearch}: a fixed harness, one editable file, a fixed five-minute
+training budget, and a keep/discard rule. Our contributions:
+
+\begin{itemize}
+\item \textbf{An open, laptop-scale harness} that turns the question into two numbers per experiment:
+  bits per byte on held-out web text (knowledge) and exact-match accuracy on a depth-controlled
+  variable-tracking task (serial reasoning), including depths never seen in training. It enforces a
+  parameter budget, reports KV-cache size, latency and peak memory, and runs any number of agents
+  while serializing GPU time so the wall-clock budget stays fair (\S\ref{sec:setup}).
+\item \textbf{A calibration result that changes the protocol.} At this scale, five minutes of training
+  from scratch (about 250 steps) leaves reasoning exactly at chance for every model and task variant
+  we tried, and we show this is slow emergence of in-context retrieval, not a bug. Experiments must
+  therefore modify a pre-trained looped model rather than train new ones (\S\ref{sec:calibration}).
+\item \textbf{Controlled comparisons against conventional transformers} with the same memory and with
+  the same depth, trained on the same schedule for the same wall-clock time (\S\ref{sec:controls}).
+\item \textbf{An agent-swarm study} of depth attention, adaptive halting, KV reuse and the training
+  recipe on top of the looped model, with seed-noise calibrated keep/discard decisions and seed
+  re-runs of every lane's best result (\S\ref{sec:swarm}).
+\end{itemize}

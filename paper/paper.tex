@@ -1,0 +1,49 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[colorlinks=true,linkcolor=black,citecolor={blue!50!black},urlcolor={blue!50!black}]{hyperref}
+\usepackage{enumitem}
+\setlist{nosep,leftmargin=*}
+\input{generated/numbers.tex}
+
+\title{\textbf{Intelligence per Gigabyte:}\\
+An Agent Swarm Studies Compact Looped Transformers on a Laptop}
+\author{Joseph Defendre\\Khoury College of Computer Sciences, Northeastern University}
+\date{November 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\input{sections/abstract.tex}
+\end{abstract}
+
+\input{sections/intro.tex}
+\input{sections/related.tex}
+\input{sections/setup.tex}
+\input{sections/results.tex}
+\input{sections/discussion.tex}
+
+\paragraph{Reproducibility.} Code, the agent program, the full experiment ledger, every training curve
+and the script that produces every number and figure in this paper are at
+\url{https://github.com/jchacker5/inkling-autoresearch}. Numbers in the text are generated from the raw
+results by \texttt{paper/make\_figures.py}; none are typed by hand.
+
+\paragraph{Acknowledgements.} Experiments in Section~\ref{sec:swarm} were proposed, implemented and run
+by autonomous Claude Code agents following \texttt{program.md}; the harness, the controls and this paper
+were built with AI assistance and checked by the author. The research loop follows Karpathy's
+autoresearch~\cite{karpathy2026autoresearch}.
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\appendix
+\input{sections/appendix.tex}
+\end{document}

@@ -16,6 +16,8 @@ fairly. "Inkling" is the working name of the model family.
 - The harness, model switches, swarm runner and tests are in place.
 - The shared base checkpoint is still training (6 hours planned on an M4, 32 GB).
 - **There are no architecture results yet.** Nothing here shows that any modification beats the baseline.
+- The paper is being written in [`paper/`](paper/): the setup and calibration sections are drafted, and the
+  results sections will be filled from the overnight campaign (`swarm/campaign.py`).
 
 How the base is doing so far (exact match on the variable-tracking task, 100 problems per hop, chance = 10%):
 

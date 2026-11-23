@@ -1,0 +1,87 @@
+\section{Setup}\label{sec:setup}
+
+\subsection{Data and the reasoning probe}
+Models read raw bytes (vocabulary 256, context 512), so cross-entropy converts directly to bits per byte
+(bpb). Text comes from a 256\,MiB slice of a ClimbMix-derived web corpus~\citep{diao2025climb}; a
+separate shard gives 8\,MiB of held-out text, of which we score 384 windows ($\approx$197k bytes).
+
+The reasoning probe is \emph{variable tracking}~\citep{hsieh2024ruler} made dense. A line declares
+single-letter variables that hold a digit or point at an earlier variable, in random order:
+\begin{center}\texttt{q=4;k=q;x=7;b=k;y=x;?b=}\,$\rightarrow$\,\texttt{4}\end{center}
+Exactly one chain has $n$ pointer hops; distractor variables are digits or point at earlier
+distractors, never deeper than $n$. Answering requires $n$ serial lookups, so deeper chains need more
+sequential computation, which is what loops are supposed to provide. In training, 8 of every 32 rows are
+such lines with $n\in\{0,\dots,6\}$ and every variable is queried, so each answer byte is a target. We
+evaluate exact match of the argmax digit for the deepest variable on 400 fixed problems per depth:
+\textbf{in-distribution} (ID) at $n\in\{2,4,6\}$ and \textbf{out-of-distribution} (OOD) at
+$n\in\{8,10\}$, deeper than anything seen in training. Chance is 10\%. Unit tests check that every
+generated answer and depth is correct.
+
+\subsection{Model}
+The baseline is a looped transformer: one prelude block, two shared core blocks applied $R=4$ times,
+and one coda block (effective depth $1+2R+1=10$), with RMSNorm, RoPE and SwiGLU, $d=384$, six heads and
+7.28M parameters. The prelude output $e$ is re-injected at every loop: $h_{r}=\mathrm{Core}(h_{r-1}+e)$.
+Experiment switches, all in one editable file:
+\begin{itemize}
+\item \textbf{Depth attention} (\texttt{DEPTH\_ATTN=$K$}, after ARLoop~\citep{yao2026arloop}): before each
+  loop, every token attends over its own last $K$ loop states,
+  $x \leftarrow x + W_o\,\mathrm{softmax}(q(x)^\top k(S)/\sqrt{d_k})\,v(S)$, with $W_o$ initialised
+  to zero.
+\item \textbf{Adaptive halting} (\texttt{HALTING}, after ACT and Mixture-of-Recursions
+  \citep{graves2016adaptive,bae2025mixture}): a router gives each token a halting probability per loop.
+  Training mixes loop states by their halting distribution and adds a ponder cost $\lambda\,\mathbb{E}[R]$;
+  evaluation freezes a token once its probability passes a threshold, and we report the realised mean
+  loops per token.
+\item \textbf{KV reuse} (\texttt{KV\_SHARE}, after \citep{huang2026looped,licakova2026kvreplay}): loops
+  after the first attend with the first loop's keys and values, so the core contributes one layer's KV
+  per block instead of $R$; the cache shrinks from 15 to 6\,KB per token.
+\item \textbf{History injection} (\texttt{HISTORY}, \texttt{LOOP\_EMBED}, after
+  \citep{zhuang2026recurrence}): add a (gated) mean of earlier loop states and a sinusoidal loop-index
+  embedding, both through zero-initialised projections.
+\item \textbf{Recipe} switches: Huginn-style random loop counts~\citep{geiping2025scaling}, truncated
+  backpropagation through loops, bf16 parameters, Muon~\citep{jordan2024muon}, and the usual learning-rate
+  and schedule settings.
+\end{itemize}
+Every switch is covered by unit tests for causality and gradient flow; the tests also verify that the
+zero-initialised switches leave a warm-started model's outputs unchanged at step 0.
+
+\subsection{Training protocol}
+AdamW ($\beta=(0.9,0.95)$, weight decay 0.1, gradient clipping 1.0), peak learning rate $10^{-3}$, 100
+warm-up steps and cosine decay to 5\% over the run's wall-clock budget, batch $32\times512$ bytes, fp32,
+in MLX~\citep{mlx2023} on a 32\,GB Apple M4 at about 14k tokens/s. Budgets are wall clock with
+compilation excluded, so a slower architecture is charged for its cost in fewer steps.
+
+\paragraph{Two stages.} A shared \emph{base} looped model is trained once for six hours. Every experiment
+loads the base, adds its modification and trains for exactly five more minutes (about 250 steps), then runs the full evaluation. The \emph{baseline} is the base plus five minutes of
+unchanged training, run with three seeds; the seed spread sets the keep/discard thresholds
+(\S\ref{sec:swarm}). Section~\ref{sec:calibration} explains why the protocol needs a base model.
+
+\paragraph{Power.} Because budgets are wall clock, a laptop on battery or in Low Power Mode trains fewer
+steps in the same time. Every GPU step waits for AC power with Low Power Mode off, and every ledger row
+records the power state.
+
+\subsection{Controls at matched training time}\label{sec:control-def}
+To ask whether looping buys reasoning per byte, we train two conventional (non-looped) transformers
+with the same code, data, optimizer and the same six-hour learning-rate schedule, and stop them after
+two hours: \textbf{Plain-4L} has the same blocks and parameter count as the looped model, applied once
+(effective depth 4); \textbf{Plain-10L} has the looped model's effective depth as ten distinct blocks
+(about 2.4$\times$ the parameters). We compare them with the looped base's own two-hour snapshot from
+the same schedule. Because time rather than steps is matched, the looped model, which does more work per
+step, gets fewer optimizer steps than Plain-4L.
+
+\subsection{Agent swarm}\label{sec:swarm-def}
+Each agent is a headless Claude Code session with its own git worktree and one \emph{lane}, a family of
+hypotheses described in \texttt{program.md}. An agent writes a one-line hypothesis, edits
+\texttt{train.py}, and calls a runner that waits for a machine-wide GPU lock, trains, evaluates, appends a
+row to a shared ledger and returns a verdict. Agents think and edit in parallel; training never
+overlaps, so every run gets the same five minutes of exclusive GPU. A run is \textbf{kept} (committed to
+the lane branch) if, against the lane's last kept run (or the baseline mean before the lane has one):
+bpb improves by at least $\tau_{\text{bpb}}$ while OOD accuracy drops by at most $\sigma_{\text{acc}}$;
+or ID or OOD accuracy improves by at least $\tau_{\text{acc}}$ while bpb worsens by at most
+$\sigma_{\text{bpb}}$; or quality is equal within noise at lower cost (mean loops, KV size or
+parameters). With three baseline seeds, $\tau=\max(\tau_0, 2\,\mathrm{sd})$ and
+$\sigma=\max(\sigma_0,\mathrm{sd})$ with defaults $\tau_0=(0.004\text{ bpb}, 3\text{ points})$ and
+$\sigma_0=(0.004, 2)$. Otherwise the agent reverts the file. After the swarm, each lane's best kept
+commit is re-run with two new seeds; a lane's result counts as \textbf{confirmed} only if the three-seed
+mean beats the baseline mean by more than twice the larger seed standard deviation on some metric
+without losing more than that on another.
