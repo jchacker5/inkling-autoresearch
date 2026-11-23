@@ -1,0 +1,11 @@
+[project]
+name = "inkling-autoresearch"
+version = "0.1.0"
+description = "Autonomous research on compact looped (recurrent-depth) language models on Apple Silicon"
+requires-python = ">=3.12"
+dependencies = [
+    "mlx==0.32.4",
+    "numpy>=2.2",
+    "pyarrow>=21.0.0",
+    "requests>=2.32.0",
+]
