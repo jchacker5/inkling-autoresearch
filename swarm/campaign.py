@@ -11,12 +11,14 @@ to re-run after a crash, a reboot or a kill, and it picks up where it stopped.
    (same unique params: 4 layers, LOOPS=1; same depth: 10 layers, LOOPS=1, ~2.4x params)
 6. full evaluation of the base (2 h snapshot and final, with a test-time loop sweep) and the controls
 
-GPU work waits for AC power without Low Power Mode, because every budget here is wall clock.
+GPU work waits for AC power without Low Power Mode (every budget here is wall clock) and for 3 GB of
+free disk (macOS swaps to it; a full disk gets the training process killed).
 """
 import argparse
 import csv
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -52,18 +54,35 @@ def run(*cmd, cwd=ROOT, env=None, check=True):
     return rc
 
 
+MIN_FREE_GB = 3.0   # macOS swaps to this disk; with it full, the kernel kills the largest process (training)
+
+
+def resources():
+    batt = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True).stdout
+    low = "lowpowermode 1" in " ".join(subprocess.run(["pmset", "-g"], capture_output=True, text=True).stdout.split())
+    free = shutil.disk_usage(str(Path.home())).free / 2**30
+    problems = []
+    if "AC Power" not in batt:
+        problems.append("on battery")
+    if low:
+        problems.append("Low Power Mode on")
+    if free < MIN_FREE_GB:
+        problems.append(f"only {free:.1f} GB free disk (need {MIN_FREE_GB})")
+    return problems
+
+
 def wait_for_power():
-    warned = False
+    """Block until the machine can train fairly and safely: AC power, no Low Power Mode, enough free disk."""
+    last = None
     while True:
-        batt = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True).stdout
-        low = "lowpowermode 1" in " ".join(subprocess.run(["pmset", "-g"], capture_output=True, text=True).stdout.split())
-        if "AC Power" in batt and not low:
-            if warned:
-                log("power OK (AC, no Low Power Mode); continuing")
+        problems = resources()
+        if not problems:
+            if last:
+                log("resources OK; continuing")
             return
-        if not warned:
-            log("waiting for AC power without Low Power Mode (wall-clock budgets depend on it)")
-            warned = True
+        if problems != last:
+            log("waiting: " + "; ".join(problems))
+            last = problems
         time.sleep(60)
 
 
