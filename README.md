@@ -1,0 +1,56 @@
+# inkling-autoresearch
+
+**Can a compact recurrent-depth language model learn to allocate its own computation and get better
+reasoning per byte of memory than a conventional transformer?**
+
+This repo adapts [Karpathy's autoresearch](https://github.com/karpathy/autoresearch) (a fixed harness, one
+editable file, a fixed 5-minute budget, keep/discard by metric, loop forever) to looped transformers on
+Apple Silicon with MLX. It adds a swarm layer, so several agents can explore different hypotheses at
+once while sharing one GPU fairly.
+
+```
+prepare.py        FIXED  data (ClimbMix bytes + synthetic multi-hop reasoning), budgets, evaluate()
+train.py          AGENT  looped transformer + experiment switches + training loop
+program.md        AGENT  research program: metrics, keep/discard rule, lanes, the loop
+swarm/run.py             one experiment: GPU flock -> train -> evaluate -> ledger -> verdict
+swarm/status.py          leaderboard over results/ledger.tsv
+swarm/launch.sh          one headless Claude Code agent per lane, each in its own worktree
+```
+
+## Quick start (M-series Mac)
+
+```sh
+uv sync
+uv run prepare.py                                   # ~270 MB in ~/.cache/inkling-autoresearch
+uv run swarm/run.py --lane baseline --desc baseline # 5 min train + ~1 min eval
+uv run swarm/status.py
+```
+
+Single agent, Karpathy style: open Claude Code here and say *"read program.md and start the loop on
+lane recipe"*. Swarm: `swarm/launch.sh nov23 recipe depth-attn halting` (see the header of
+`swarm/launch.sh` for knobs, and use `DRY_RUN=1` first).
+
+## What the harness measures
+
+- `val_bpb`: held-out web text, the knowledge proxy.
+- `reason_id` / `reason_ood`: exact match on multi-hop variable tracking at 2/4/6 hops (seen in training)
+  and 8/10 hops (never seen). Deeper chains need more serial computation, which is what loops should buy.
+- Test-time scaling: the same weights at loops/2 and 2x loops.
+- Costs: unique params (budget 12M, so "per gigabyte" is enforced), analytical KV KB/token, batch-1
+  latency, peak MLX memory, and realised mean loops per token under halting.
+
+## Model
+
+`prelude -> [shared core blocks] x LOOPS -> coda`, with RoPE, RMSNorm and SwiGLU. Switches:
+`DEPTH_ATTN` (attend over earlier loop states), `HALTING` (per-token ACT-style halting with a ponder cost),
+`HISTORY` / `LOOP_EMBED` (history-state injection and loop-index conditioning), `KV_SHARE` (later loops
+reuse loop-1 K/V), `RANDOM_LOOPS` / `BPTT_LOOPS` (Huginn-style training for test-time scaling).
+These are first-pass implementations written from one-paragraph descriptions of the cited methods,
+not reproductions of the papers.
+
+## Why the swarm serializes training
+
+The budget is wall-clock, so two runs sharing the GPU would each get half the steps and every
+comparison would be corrupted. Agents think, read and edit in parallel. `swarm/run.py` holds an
+exclusive flock while training. Throughput is about 10 experiments per hour total; extra lanes add
+diversity of ideas, not speed.

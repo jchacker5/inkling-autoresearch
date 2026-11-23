@@ -26,7 +26,7 @@ VOCAB_SIZE = 256                  # raw bytes
 TIME_BUDGET = 300                 # training wall-clock seconds
 MAX_PARAMS = 12_000_000           # parameter budget (unique weights), ~24 MB in bf16
 MAX_PEAK_MEM_GB = 20.0            # leave headroom on a 32 GB M4
-REASONING_MIX = 4                 # rows per 32 that come from the reasoning stream
+REASONING_MIX = 8                 # rows per 32 that come from the reasoning stream
 TRAIN_HOPS = (1, 6)               # inclusive hop range seen in training
 EVAL_HOPS_ID = (2, 4, 6)          # in-distribution evaluation hops
 EVAL_HOPS_OOD = (8, 10)           # out-of-distribution (deeper) hops
@@ -53,7 +53,7 @@ DOC_SEP = 0                       # byte 0 separates documents
 # so the model must look up and compose values. Deeper chains need more serial compute,
 # which is exactly what recurrent depth is supposed to buy.
 _LETTERS = "abcdefghijklmnopqrstuvwxyz"
-_OPS = "+-*"
+_OPS = "+-"
 
 
 def make_problem(rng, hops):
@@ -62,7 +62,7 @@ def make_problem(rng, hops):
     value = int(rng.integers(0, 10))
     chain_stmts = [f"{chain[0]}={value}"]
     for i in range(1, hops + 1):
-        op, d = _OPS[int(rng.integers(0, 3))], int(rng.integers(1, 10))
+        op, d = _OPS[int(rng.integers(0, len(_OPS)))], int(rng.integers(1, 10))
         value = {"+": value + d, "-": value - d, "*": value * d}[op] % 10
         chain_stmts.append(f"{chain[i]}={chain[i-1]}{op}{d}")
     dist_stmts = [f"{n}={int(rng.integers(0, 10))}" for n in distract]
