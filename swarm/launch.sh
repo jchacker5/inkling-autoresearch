@@ -18,6 +18,10 @@ SESSIONS=${SESSIONS:-4}; EXPERIMENTS=${EXPERIMENTS:-6}
 ROOT=$(git rev-parse --show-toplevel); cd "$ROOT"
 export UV_PROJECT_ENVIRONMENT="$ROOT/.venv"   # one shared venv; no per-worktree installs
 mkdir -p lanes results
+BASE="$HOME/.cache/inkling-autoresearch/base.safetensors"
+if [ ! -f "$BASE" ] || pgrep -f pretrain_base.py >/dev/null; then
+  echo "base checkpoint missing or still training ($BASE). Finish 'uv run pretrain_base.py' first."; [ "${DRY_RUN:-}" = 1 ] || exit 1
+fi
 
 for lane in "${LANES[@]}"; do
   wt="$ROOT/lanes/$lane"; br="ar/$TAG/$lane"

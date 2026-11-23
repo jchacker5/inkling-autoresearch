@@ -4,3 +4,5 @@ run.log
 runs/
 lanes/
 *.safetensors
+results/ledger.tsv
+results/*.log

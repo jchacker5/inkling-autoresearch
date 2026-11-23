@@ -10,8 +10,24 @@ by metric) adapted to MLX on a 32 GB M4. It can run as a single agent or as a sw
 
 - `prepare.py`: FIXED. Data, the training mixture, budgets, and `evaluate()`. Never edit it.
 - `train.py`: the ONLY file you edit. Model, switches, optimizer, training loop.
+- `pretrain_base.py`: FIXED. Builds the shared base checkpoint once. Never re-run it during a session.
 - `swarm/run.py`: run one experiment through the shared GPU lock and append it to the ledger. Always use it.
 - `swarm/status.py`: leaderboard and per-lane bests.
+
+## Two-stage design (read this first)
+
+In-context retrieval, the circuit the reasoning task needs, only emerges after thousands of steps. A
+5-minute from-scratch run on this M4 reaches about 250 steps and scores at chance (see
+`results/calibration.md`). So every experiment **warm-starts from the shared base checkpoint**
+(`~/.cache/inkling-autoresearch/base.safetensors`, a looped model trained once for hours) and then trains
+for the fixed 5 minutes with your modification. Consequences:
+
+- New modules must start as a no-op (zero-init output projections, gates that start closed) so the base
+  is not damaged on step 1. Every switch in `train.py` already does this.
+- The backbone shape (`D_MODEL`, `N_HEADS`, `PRELUDE`/`CORE`/`CODA`, MLP size) is fixed by the base.
+  `train.py` refuses a mismatched load. Shape changes need `INIT_FROM_BASE = False`, which is only fair
+  against a from-scratch control (recipe lane).
+- The baseline is "base + 5 minutes of unchanged training", not the base itself.
 
 ## Fixed rules (from prepare.py)
 
@@ -74,10 +90,11 @@ Each lane is one hypothesis family. In a swarm each agent owns one lane. Alone, 
 4. **kv-reuse** (fixed-point / shared KV). `KV_SHARE=True` cuts KV by about 2.5x. Find the variant that keeps
    quality: share from the last loop instead of the first, share only K, or measure state convergence
    (||h_r - h_{r-1}|| / ||h_r||) and reuse once converged. Hypothesis: much smaller cache, negligible quality loss.
-5. **recipe** (fair baseline). Before crediting any architecture: tune the plain looped baseline (LR, batch,
-   width vs loops, `RANDOM_LOOPS`, `BPTT_LOOPS`, bf16 params via `model.set_dtype`, Muon via
-   `mlx.optimizers.Muon`) and a NON-looped control at the same param count (`LOOPS=1`, more unique
-   blocks). Every other lane's win is measured against this lane's best, so it must not be weak.
+5. **recipe** (fair baseline). Before crediting any architecture, tune the continued-training recipe:
+   LR, warmup, batch, `RANDOM_LOOPS` (Huginn-style, needed for test-time scaling), `BPTT_LOOPS`, bf16
+   params via `model.set_dtype` (1.4x throughput, measured), and Muon via `mlx.optimizers.Muon`. Every
+   other lane's win is measured against this lane's best, so it must not be weak. A NON-looped control
+   at the same unique-param count belongs in the paper, and needs its own base (a human decision).
 6. **parallel-recurrence** (LoopFold-style): phase 2, inference only. Predict later loop states, run them
    in parallel and correct them. Only start once lanes 1-4 have a confirmed model. Measure real wall clock
    with MLX, not FLOPs.
@@ -88,7 +105,9 @@ Setup, once per session:
 1. `git status` should be clean. You are on your lane branch (swarm) or `ar/<tag>` (single agent).
 2. `uv run swarm/status.py` to read the ledger: baseline, noise, other lanes' results. Do not repeat
    an experiment that is already in the ledger.
-3. If the ledger has no baseline for this commit of `main`, run it first.
+3. If the base checkpoint is missing, stop and say so. Do not build it yourself.
+4. If the ledger has no `baseline` lane row for this commit of `main`, run it first:
+   `uv run swarm/run.py --lane baseline --desc baseline`, then again with `SEED = 1` for a noise estimate.
 
 Then LOOP (until your session's experiment budget is used up, or forever if none was given):
 1. Pick one idea. Write the hypothesis in one line before you edit anything.
