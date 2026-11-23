@@ -7,7 +7,7 @@ on:
 
 jobs:
   test:
-    runs-on: macos-14          # Apple Silicon; MLX has no Linux GPU path we rely on
+    runs-on: macos-latest      # Apple Silicon (arm64); tests force the MLX CPU device
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
