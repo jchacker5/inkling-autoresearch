@@ -11,6 +11,7 @@ Experiment switches below map to the research directions in program.md:
 Usage: uv run train.py > run.log 2>&1
 """
 import math
+import os
 import time
 
 import mlx.core as mx
@@ -19,7 +20,7 @@ import mlx.optimizers as optim
 import numpy as np
 from mlx.utils import tree_flatten
 
-from prepare import SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, Batches, evaluate
+from prepare import BASE_CKPT, SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, Batches, evaluate
 
 # ---------------------------------------------------------------------------
 # Hyperparameters and experiment switches
@@ -42,8 +43,9 @@ PONDER_COST = 0.01                 # penalty per expected loop (in nats)
 HALT_THRESHOLD = 0.5               # eval: token freezes once cumulative halt prob crosses this
 KV_SHARE = False                   # core loops >1 attend with loop-1 K/V (KV cache ~ 1 loop)
 
+INIT_FROM_BASE = True              # continue from the shared base checkpoint (see pretrain_base.py)
 BATCH_SIZE = 32
-LR = 3e-3
+LR = 1e-3                          # peak LR (from-scratch base pretraining also uses 1e-3)
 WEIGHT_DECAY = 0.1
 WARMUP_STEPS = 100
 FINAL_LR_FRAC = 0.05
@@ -221,15 +223,22 @@ class Inkling(nn.Module):
 # ---------------------------------------------------------------------------
 # Training (fixed wall-clock budget)
 # ---------------------------------------------------------------------------
-def main():
-    mx.random.seed(SEED)
-    rng = np.random.default_rng(SEED)
-    model = Inkling()
-    mx.eval(model.parameters())
-    n_params = sum(v.size for _, v in tree_flatten(model.parameters()))
-    print(f"params: {n_params/1e6:.2f}M  effective depth: {PRELUDE + CORE*LOOPS + CODA}")
+def load_base(model, path):
+    """Warm-start from the shared base checkpoint. New modules keep their (zero) init; shapes must match."""
+    base = dict(mx.load(path).items())
+    own = dict(tree_flatten(model.parameters()))
+    bad = [k for k, v in base.items() if k in own and own[k].shape != v.shape]
+    if bad:
+        raise SystemExit(f"FAIL: base checkpoint shape mismatch for {bad[:5]}; keep the backbone shape or set INIT_FROM_BASE=False")
+    model.load_weights([(k, v) for k, v in base.items() if k in own], strict=False)
+    new = sorted(k for k in own if k not in base)
+    print(f"warm-started from {path}; {len(new)} new tensors at init: {new[:8]}")
 
-    opt = optim.AdamW(learning_rate=LR, weight_decay=WEIGHT_DECAY, betas=[0.9, 0.95])
+
+def train(model, budget, lr_peak, seed=SEED, log_every=50, on_tick=None):
+    """Train `model` for `budget` seconds of wall clock (compile warm-up excluded). Returns train_info."""
+    rng = np.random.default_rng(seed)
+    opt = optim.AdamW(learning_rate=lr_peak, weight_decay=WEIGHT_DECAY, betas=[0.9, 0.95])
     grad_fn = nn.value_and_grad(model, lambda b, k: model.loss(b, k))
     state = [model.state, opt.state]
     steps_fns = {}
@@ -244,12 +253,13 @@ def main():
             steps_fns[k] = mx.compile(step, inputs=state, outputs=state)
         return steps_fns[k]
 
-    data = Batches(BATCH_SIZE, seed=SEED)
+    model.train()
+    data = Batches(BATCH_SIZE, seed=seed)
     step, tokens, t_train, ce_ema = 0, 0, 0.0, None
-    while t_train < TIME_BUDGET:
+    while t_train < budget:
         t0 = time.perf_counter()
-        progress = t_train / TIME_BUDGET
-        lr = LR * min(1.0, (step + 1) / WARMUP_STEPS) * (FINAL_LR_FRAC + (1 - FINAL_LR_FRAC) * 0.5 * (1 + math.cos(math.pi * progress)))
+        progress = t_train / budget
+        lr = lr_peak * min(1.0, (step + 1) / WARMUP_STEPS) * (FINAL_LR_FRAC + (1 - FINAL_LR_FRAC) * 0.5 * (1 + math.cos(math.pi * progress)))
         opt.learning_rate = lr
         k = int(rng.integers(1, 2 * LOOPS)) if RANDOM_LOOPS else LOOPS
         loss, ce = step_fn(k)(mx.array(next(data)))
@@ -259,13 +269,29 @@ def main():
             t_train += dt
         tokens += BATCH_SIZE * SEQ_LEN
         ce_ema = ce.item() if ce_ema is None else 0.98 * ce_ema + 0.02 * ce.item()
-        if step % 50 == 0:
+        if step % log_every == 0:
             print(f"step {step:5d} | t {t_train:6.1f}s | lr {lr:.2e} | loops {k} | train_bpb {ce_ema/math.log(2):.4f} | {BATCH_SIZE*SEQ_LEN/dt/1e3:.1f}k tok/s", flush=True)
         if not math.isfinite(loss.item()):
             raise SystemExit("FAIL: non-finite loss")
         step += 1
+        if on_tick:
+            on_tick(step, t_train)
+    return {"training_seconds": t_train, "steps": step, "tokens_M": tokens / 1e6}
 
-    evaluate(model, {"training_seconds": t_train, "steps": step, "tokens_M": tokens / 1e6})
+
+def main():
+    mx.random.seed(SEED)
+    model = Inkling()
+    mx.eval(model.parameters())
+    n_params = sum(v.size for _, v in tree_flatten(model.parameters()))
+    print(f"params: {n_params/1e6:.2f}M  effective depth: {PRELUDE + CORE*LOOPS + CODA}")
+    if INIT_FROM_BASE:
+        if not os.path.exists(BASE_CKPT):
+            raise SystemExit(f"FAIL: {BASE_CKPT} missing; run `uv run pretrain_base.py` once (or set INIT_FROM_BASE=False)")
+        load_base(model, BASE_CKPT)
+    info = train(model, TIME_BUDGET, LR)
+    info["init_from_base"] = INIT_FROM_BASE
+    evaluate(model, info)
 
 
 if __name__ == "__main__":

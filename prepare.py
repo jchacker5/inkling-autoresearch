@@ -27,7 +27,7 @@ TIME_BUDGET = 300                 # training wall-clock seconds
 MAX_PARAMS = 12_000_000           # parameter budget (unique weights), ~24 MB in bf16
 MAX_PEAK_MEM_GB = 20.0            # leave headroom on a 32 GB M4
 REASONING_MIX = 8                 # rows per 32 that come from the reasoning stream
-TRAIN_HOPS = (1, 6)               # inclusive hop range seen in training
+TRAIN_HOPS = (0, 6)               # inclusive hop range seen in training
 EVAL_HOPS_ID = (2, 4, 6)          # in-distribution evaluation hops
 EVAL_HOPS_OOD = (8, 10)           # out-of-distribution (deeper) hops
 EVAL_PER_HOP = 400
@@ -43,47 +43,59 @@ TRAIN_SHARD, VAL_SHARD = 0, 6542
 TRAIN_BYTES_CAP = 256 * 2**20
 VAL_BYTES_CAP = 8 * 2**20
 REASON_TRAIN_BYTES = 16 * 2**20
+BASE_CKPT = os.path.join(CACHE_DIR, "base.safetensors")   # shared warm start, built once by pretrain_base.py
 DOC_SEP = 0                       # byte 0 separates documents
 
 # ---------------------------------------------------------------------------
 # Synthetic multi-hop reasoning task
 # ---------------------------------------------------------------------------
-# "Q: k=3;b=7;x=k+4;q=b*2;z=x-5;z? A:2\n" -- answer is a single digit (mod 10).
-# A chain of `hops` dependent assignments is interleaved with `hops` distractors,
-# so the model must look up and compose values. Deeper chains need more serial compute,
-# which is exactly what recurrent depth is supposed to buy.
+# Variable tracking over a forest of pointer chains (RULER-style VT, made dense):
+#     "q=4;k=q;x=7;b=k;y=x;?b=4?y=7?q=4?k=4?x=7\n"
+# One chain of exactly `hops` pointer steps is interleaved with distractor variables that are digits or
+# point at earlier distractors (never deeper than `hops`). Training lines query every variable, so every
+# answer byte is a learnable target. Evaluation asks only the deepest chain: "<statements>;?b=" -> "4".
+# Each hop is one more serial lookup, so deeper chains need more computation, which is what recurrent
+# depth is supposed to buy. Chance is 10%.
 _LETTERS = "abcdefghijklmnopqrstuvwxyz"
-_OPS = "+-"
+
+
+def _forest(rng, hops):
+    n_dist = min(hops + 2, 25 - hops)
+    names = list(rng.permutation(list(_LETTERS))[: hops + 1 + n_dist])
+    chain, distract = names[: hops + 1], names[hops + 1:]
+    is_chain = set(np.sort(rng.choice(len(names), hops + 1, replace=False)).tolist())
+    stmts, val, depth, ci, di, emitted = [], {}, {}, 0, 0, []
+    for pos in range(len(names)):
+        if pos in is_chain:
+            v = chain[ci]
+            if ci == 0:
+                val[v], depth[v] = int(rng.integers(0, 10)), 0; stmts.append(f"{v}={val[v]}")
+            else:
+                p = chain[ci - 1]; val[v], depth[v] = val[p], ci; stmts.append(f"{v}={p}")
+            ci += 1
+        else:
+            v = distract[di]; di += 1
+            ok = [u for u in emitted if depth[u] < hops]
+            if ok and rng.random() < 0.5:
+                p = ok[int(rng.integers(0, len(ok)))]; val[v], depth[v] = val[p], depth[p] + 1; stmts.append(f"{v}={p}")
+            else:
+                val[v], depth[v] = int(rng.integers(0, 10)), 0; stmts.append(f"{v}={val[v]}")
+            emitted.append(v)
+    return ";".join(stmts), chain[-1], val
 
 
 def make_problem(rng, hops):
-    names = rng.permutation(list(_LETTERS))[: 2 * hops + 1]
-    chain, distract = names[: hops + 1], names[hops + 1:]
-    value = int(rng.integers(0, 10))
-    chain_stmts = [f"{chain[0]}={value}"]
-    for i in range(1, hops + 1):
-        op, d = _OPS[int(rng.integers(0, len(_OPS)))], int(rng.integers(1, 10))
-        value = {"+": value + d, "-": value - d, "*": value * d}[op] % 10
-        chain_stmts.append(f"{chain[i]}={chain[i-1]}{op}{d}")
-    dist_stmts = [f"{n}={int(rng.integers(0, 10))}" for n in distract]
-    # interleave while preserving chain order
-    slots = np.sort(rng.choice(len(chain_stmts) + len(dist_stmts), len(chain_stmts), replace=False))
-    out, ci, di = [], 0, 0
-    for pos in range(len(chain_stmts) + len(dist_stmts)):
-        if ci < len(slots) and pos == slots[ci]:
-            out.append(chain_stmts[ci]); ci += 1
-        else:
-            out.append(dist_stmts[di]); di += 1
-    prompt = f"Q: {';'.join(out)};{chain[-1]}? A:"
-    return prompt, str(value)
+    stmts, q, val = _forest(rng, hops)
+    return f"{stmts};?{q}=", str(val[q])
 
 
 def _reasoning_stream(seed, nbytes):
     rng = np.random.default_rng(seed)
     parts, total = [], 0
     while total < nbytes:
-        p, a = make_problem(rng, int(rng.integers(TRAIN_HOPS[0], TRAIN_HOPS[1] + 1)))
-        s = (p + a + "\n").encode()
+        stmts, _, val = _forest(rng, int(rng.integers(TRAIN_HOPS[0], TRAIN_HOPS[1] + 1)))
+        qs = "".join(f"?{v}={val[v]}" for v in rng.permutation(list(val)))
+        s = f"{stmts};{qs}\n".encode()
         parts.append(s); total += len(s)
     return np.frombuffer(b"".join(parts)[:nbytes], dtype=np.uint8)
 
