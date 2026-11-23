@@ -56,8 +56,9 @@ while hurting factual knowledge. Report both every time.
 
 ## Keep / discard rule
 
-`swarm/run.py` prints a verdict against your lane's current best. Defaults, which must be re-calibrated
-to the measured seed noise in `results/noise.md` once it exists:
+`swarm/run.py` prints a verdict against your lane's last kept run, or, before your lane has one, against
+the **mean of the baseline seeds**. The thresholds below are defaults; once the ledger has 3 baseline seeds,
+run.py raises each gain threshold to 2x the measured seed std and each slack to 1x (see `results/noise.md`):
 
 - **keep** if `val_bpb` improves by >= 0.004 and `reason_ood` drops by no more than 0.02, OR
   `reason_ood` (or `reason_id`) improves by >= 0.03 and `val_bpb` worsens by no more than 0.004, OR
@@ -65,8 +66,11 @@ to the measured seed noise in `results/noise.md` once it exists:
 - otherwise **discard**. An invalid run (violations, crash, smoke) is always discarded.
 - Simplicity criterion (Karpathy): a tiny gain bought with lots of code is not worth it. Deleting code at
   equal quality is a win.
-- Claims of improvement need confirmation: before a lane's best is promoted to `main`, re-run it with
-  `SEED = 1` and `SEED = 2`; promote only if the mean beats baseline by more than 2x the seed std.
+- Claims of improvement need confirmation: re-run a lane's best with `--seed 1` and `--seed 2` (never by
+  editing `SEED`); promote only if the mean beats the baseline mean by more than 2x the seed std. The
+  campaign (`swarm/campaign.py`) does this automatically for every lane's last kept commit.
+- Every ledger row records `seed` and `power`. Runs on battery or Low Power Mode get fewer steps in the same
+  wall clock and are not comparable; the campaign waits for AC power, and so should you.
 
 ## Compute control
 
@@ -109,8 +113,9 @@ Setup, once per session:
 2. `uv run swarm/status.py` to read the ledger: baseline, noise, other lanes' results. Do not repeat
    an experiment that is already in the ledger.
 3. If the base checkpoint is missing, stop and say so. Do not build it yourself.
-4. If the ledger has no `baseline` lane row for this commit of `main`, run it first:
-   `uv run swarm/run.py --lane baseline --desc baseline`, then again with `SEED = 1` for a noise estimate.
+4. If the ledger has no `baseline` rows (the campaign normally runs them before any agent starts), run
+   `uv run swarm/run.py --lane baseline --seed S --desc "baseline seed S"` for S = 0, 1, 2, then
+   `uv run swarm/status.py --noise`.
 
 Then LOOP (until your session's experiment budget is used up, or forever if none was given):
 1. Pick one idea. Write the hypothesis in one line before you edit anything.

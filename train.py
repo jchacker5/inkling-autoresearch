@@ -25,7 +25,7 @@ from prepare import BASE_CKPT, SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, Batches, evalua
 # ---------------------------------------------------------------------------
 # Hyperparameters and experiment switches
 # ---------------------------------------------------------------------------
-SEED = 0
+SEED = int(os.environ.get("INKLING_SEED", "0"))   # swarm/run.py --seed sets this
 D_MODEL = 384
 N_HEADS = 6
 MLP_MULT = 4
@@ -235,8 +235,11 @@ def load_base(model, path):
     print(f"warm-started from {path}; {len(new)} new tensors at init: {new[:8]}")
 
 
-def train(model, budget, lr_peak, seed=SEED, log_every=50, on_tick=None):
-    """Train `model` for `budget` seconds of wall clock (compile warm-up excluded). Returns train_info."""
+def train(model, budget, lr_peak, seed=SEED, log_every=50, on_tick=None, stop_after=None):
+    """Train `model` for `budget` seconds of wall clock (compile warm-up excluded). Returns train_info.
+
+    stop_after: stop early after this many seconds while keeping the LR schedule of the full budget
+    (used to snapshot control models at a matched point of the same schedule)."""
     rng = np.random.default_rng(seed)
     opt = optim.AdamW(learning_rate=lr_peak, weight_decay=WEIGHT_DECAY, betas=[0.9, 0.95])
     grad_fn = nn.value_and_grad(model, lambda b, k: model.loss(b, k))
@@ -256,7 +259,8 @@ def train(model, budget, lr_peak, seed=SEED, log_every=50, on_tick=None):
     model.train()
     data = Batches(BATCH_SIZE, seed=seed)
     step, tokens, t_train, ce_ema = 0, 0, 0.0, None
-    while t_train < budget:
+    end = min(budget, stop_after) if stop_after else budget
+    while t_train < end:
         t0 = time.perf_counter()
         progress = t_train / budget
         lr = lr_peak * min(1.0, (step + 1) / WARMUP_STEPS) * (FINAL_LR_FRAC + (1 - FINAL_LR_FRAC) * 0.5 * (1 + math.cos(math.pi * progress)))

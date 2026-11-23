@@ -18,10 +18,45 @@ from pathlib import Path
 
 CACHE = Path.home() / ".cache" / "inkling-autoresearch"
 FIELDS = ["time", "lane", "commit", "dirty", "val_bpb", "reason_id", "reason_ood", "ood_at_2x", "bpb_at_2x",
-          "mean_loops", "params", "kv_kb", "latency_ms", "peak_gb", "steps", "valid", "verdict", "desc", "hypothesis"]
+          "mean_loops", "params", "kv_kb", "latency_ms", "peak_gb", "steps", "valid", "verdict", "desc", "hypothesis",
+          "seed", "power"]
 
-# Thresholds from program.md. Re-calibrate after measuring seed noise (results/noise.md).
+# Default thresholds from program.md. Once the ledger holds >= 3 baseline seeds, each threshold becomes
+# max(default, 2 x the measured seed std) for gains and max(default, 1 x std) for slacks (see thresholds()).
 BPB_GAIN, BPB_SLACK, ACC_GAIN, ACC_SLACK = 0.004, 0.004, 0.03, 0.02
+METRICS = ("val_bpb", "reason_id", "reason_ood", "mean_loops", "kv_kb", "params")
+
+
+def power_state():
+    """'AC' or 'battery', plus '+lowpower' when Low Power Mode is on. Wall-clock budgets depend on it."""
+    batt = sh("pmset", "-g", "batt")
+    low = "lowpowermode 1" in " ".join(sh("pmset", "-g").split())
+    return ("AC" if "AC Power" in batt else "battery") + ("+lowpower" if low else "")
+
+
+def baseline_rows(rows):
+    return [r for r in rows if r["lane"] == "baseline" and r["valid"] == "True"]
+
+
+def baseline_mean(rows):
+    b = baseline_rows(rows)
+    if not b:
+        return None
+    m = {k: str(sum(float(r[k] or 0) for r in b) / len(b)) for k in METRICS}
+    m["params"] = b[-1]["params"]
+    m.update(commit=b[-1]["commit"], desc=f"baseline mean of {len(b)} seed(s)")
+    return m
+
+
+def thresholds(rows):
+    import statistics as st
+    b = baseline_rows(rows)
+    if len(b) < 3:
+        return BPB_GAIN, BPB_SLACK, ACC_GAIN, ACC_SLACK
+    sd = {k: st.stdev(float(r[k]) for r in b) for k in ("val_bpb", "reason_id", "reason_ood")}
+    sd_acc = max(sd["reason_id"], sd["reason_ood"])
+    return (max(BPB_GAIN, 2 * sd["val_bpb"]), max(BPB_SLACK, sd["val_bpb"]),
+            max(ACC_GAIN, 2 * sd_acc), max(ACC_SLACK, sd_acc))
 
 
 def sh(*a, cwd=None):
@@ -47,12 +82,13 @@ def read_ledger(path):
 
 
 def best_for(rows, lane):
-    ok = [r for r in rows if r["valid"] == "True" and r["verdict"] in ("keep", "baseline") and r["lane"] in (lane, "baseline")]
-    lane_rows = [r for r in ok if r["lane"] == lane] or [r for r in ok if r["lane"] == "baseline"]
-    return lane_rows[-1] if lane_rows else None
+    """The reference a new run must beat: the lane's last kept run, else the mean of the baseline seeds."""
+    kept = [r for r in rows if r["valid"] == "True" and r["verdict"] == "keep" and r["lane"] == lane]
+    return kept[-1] if kept else baseline_mean(rows)
 
 
-def verdict(res, best):
+def verdict(res, best, th=(BPB_GAIN, BPB_SLACK, ACC_GAIN, ACC_SLACK)):
+    BPB_GAIN, BPB_SLACK, ACC_GAIN, ACC_SLACK = th
     if not res.get("valid"):
         return "discard", "invalid: " + ("; ".join(res.get("violations", [])) or "smoke/crash")
     if best is None:
@@ -79,7 +115,10 @@ def main():
     ap.add_argument("--desc", required=True)
     ap.add_argument("--hypothesis", default="")
     ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument("--seed", type=int, default=None, help="sets INKLING_SEED for train.py (default: train.py's SEED)")
     a = ap.parse_args()
+    if a.seed is not None:
+        os.environ["INKLING_SEED"] = str(a.seed)
 
     root = repo_root()
     os.chdir(root)
@@ -98,6 +137,7 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX)
         print(f"[{a.lane}] got lock after {time.time()-t_wait:.0f}s; training {a.desc!r}", flush=True)
         lock.write(f"{os.getpid()} {a.lane} {a.desc}\n"); lock.flush()
+        power = power_state()
         log = run_dir / "run.log"
         try:
             with open(log, "w") as f:
@@ -115,9 +155,14 @@ def main():
     with open(CACHE / "ledger.lock", "w") as llock:
         fcntl.flock(llock, fcntl.LOCK_EX)
         rows = read_ledger(ledger)
-        v, why = verdict(res, best_for(rows, a.lane))
-        if v == "baseline" and a.lane != "baseline":
-            v = "keep"
+        th = thresholds(rows)
+        if a.lane == "baseline":
+            v, why = ("baseline", "baseline seed") if res.get("valid") else verdict(res, None, th)
+        else:
+            v, why = verdict(res, best_for(rows, a.lane), th)
+            if v == "baseline":
+                v = "keep"
+        why += f" | thresholds bpb_gain {th[0]:.4f} acc_gain {th[2]:.3f} | power {power}"
         sc = res.get("scaling", {})
         big = sc[max(sc, key=int)] if sc else {}
         row = dict(time=stamp, lane=a.lane, commit=commit, dirty=str(bool(diff)), val_bpb=f"{res['val_bpb']:.5f}",
@@ -126,7 +171,8 @@ def main():
                    mean_loops=f"{res.get('mean_loops_per_token') or 0:.3f}", params=res.get("params", 0),
                    kv_kb=f"{res.get('kv_kb_per_token') or 0:.2f}", latency_ms=f"{res.get('latency_ms_b1', 0):.2f}",
                    peak_gb=f"{res.get('peak_mem_gb', 0):.2f}", steps=res.get("steps", 0), valid=str(res.get("valid")),
-                   verdict=v, desc=a.desc, hypothesis=a.hypothesis)
+                   verdict=v, desc=a.desc, hypothesis=a.hypothesis,
+                   seed=os.environ.get("INKLING_SEED", "0"), power=power)
         new = not ledger.exists()
         with open(ledger, "a", newline="") as f:
             w = csv.DictWriter(f, FIELDS, delimiter="\t")
