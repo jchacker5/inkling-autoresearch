@@ -11,6 +11,7 @@ import csv
 import fcntl
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -28,7 +29,11 @@ METRICS = ("val_bpb", "reason_id", "reason_ood", "mean_loops", "kv_kb", "params"
 
 
 def power_state():
-    """'AC' or 'battery', plus '+lowpower' when Low Power Mode is on. Wall-clock budgets depend on it."""
+    """'AC' or 'battery', plus '+lowpower' when Low Power Mode is on. Wall-clock budgets depend on it.
+    Off macOS (e.g. a CUDA box) there is no power state; the GPU name is recorded instead."""
+    if not shutil.which("pmset"):
+        gpu = sh("nvidia-smi", "--query-gpu=name", "--format=csv,noheader") if shutil.which("nvidia-smi") else ""
+        return os.environ.get("INKLING_DEVICE") or (gpu.splitlines()[0].strip() if gpu else "unknown")
     batt = sh("pmset", "-g", "batt")
     low = "lowpowermode 1" in " ".join(sh("pmset", "-g").split())
     return ("AC" if "AC Power" in batt else "battery") + ("+lowpower" if low else "")
