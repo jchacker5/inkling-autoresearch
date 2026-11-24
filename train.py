@@ -56,6 +56,18 @@ KV_SHARE = False                   # core loops >1 attend with loop-1 K/V (KV ca
 EXIT_TAU = 0.0                     # eval only: >0 freezes a token once its loop-to-loop change falls below tau
 EXIT_METRIC = "kl"                 # "kl": KL(new || previous readout through coda+head); "state": relative L2 change
 LOOP_CONSIST = 0.0                 # train: weight of soft CE from final-loop readout to one random earlier loop
+CANON = 0                          # >0: Canon layers (Allen-Zhu, Physics of LMs 4.1): a residual causal depthwise
+                                   # conv of this kernel size on each block's attention and MLP inputs. Zero-init,
+                                   # so warm starts begin as a no-op. Gives every position its neighbours, so an
+                                   # induction match on a 2-byte key ("r=") needs no previous-token head.
+SLEEP = 0                          # >0: sleep window W (Lee et al. 2026, "Sample-Efficient In-Context Adaptation via
+                                   # Sleep"). Predictions come from a one-pass "wake" stream (prelude, core once, coda)
+                                   # that attends to the context of earlier W-byte windows as refined by the full
+                                   # LOOPS-deep "sleep" stream, and to its own window's wake states. Inference: decode
+                                   # each byte with one pass; when a window fills, run the loops over it ("sleep").
+DREAM = 0.0                        # >0 (needs SLEEP): consolidation. Soft CE from the sleep stream's own deep
+                                   # prediction (stop-gradient) into the wake prediction, so the fast path absorbs
+                                   # what the loops compute; the sleep readout also gets its CE at this weight.
 CHUNK = 1                          # >1: core runs on K-byte chunks (changes the architecture; new base needed)
 ANSWER_W = 3.0                     # loss weight on reasoning answer digits ("?v=D"; unweighted they are ~2.4% of loss)
 FIRST_ANSWER_W = 30.0              # weight on each line's FIRST answer: a chain end, the only deep, question-dependent
@@ -97,7 +109,9 @@ class Attention(nn.Module):
         k = self.rope(k.reshape(B, T, self.h, self.hd).transpose(0, 2, 1, 3))
         return k, v.reshape(B, T, self.h, self.hd).transpose(0, 2, 1, 3)
 
-    def __call__(self, x, kv=None):
+    def __call__(self, x, kv=None, mem=None):
+        """mem = (k_mem, v_mem, mask): extra keys/values (same positions, RoPE applied) placed before this
+        stream's own; mask (T, 2T) bool, True = attend (SLEEP's wake stream)."""
         B, T, D = x.shape
         q, k, v = mx.split(self.qkv(x), 3, axis=-1)
         q = self.rope(q.reshape(B, T, self.h, self.hd).transpose(0, 2, 1, 3))
@@ -106,8 +120,22 @@ class Attention(nn.Module):
             v = v.reshape(B, T, self.h, self.hd).transpose(0, 2, 1, 3)
         else:
             k, v = kv
-        a = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.hd ** -0.5, mask="causal")
+        if mem is None:
+            a = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.hd ** -0.5, mask="causal")
+        else:
+            km, vm, mask = mem
+            a = mx.fast.scaled_dot_product_attention(q, mx.concatenate([km, k], axis=2), mx.concatenate([vm, v], axis=2),
+                                                     scale=self.hd ** -0.5, mask=mask)
         return self.o(a.transpose(0, 2, 1, 3).reshape(B, T, D)), (k, v)
+
+
+def causal_conv(h, w):
+    """Depthwise causal conv over time: out[t] = sum_i w[i] * h[t - i] (zero before the start). h: (B, T, D), w: (K, D)."""
+    T = h.shape[1]
+    out = w[0] * h
+    for i in range(1, w.shape[0]):
+        out = out + w[i] * mx.pad(h, [(0, 0), (i, 0), (0, 0)])[:, :T]
+    return out
 
 
 class Block(nn.Module):
@@ -119,11 +147,19 @@ class Block(nn.Module):
         self.gate = nn.Linear(d, hidden, bias=False)
         self.up = nn.Linear(d, hidden, bias=False)
         self.down = nn.Linear(hidden, d, bias=False)
+        if CANON > 0:
+            self.canon_a = mx.zeros((CANON, d))
+            self.canon_c = mx.zeros((CANON, d))
 
-    def __call__(self, x, kv=None):
-        a, kv = self.attn(self.n1(x), kv)
+    def __call__(self, x, kv=None, mem=None):
+        h = self.n1(x)
+        if "canon_a" in self:
+            h = h + causal_conv(h, self.canon_a)
+        a, kv = self.attn(h, kv, mem)
         x = x + a
         y = self.n2(x)
+        if "canon_c" in self:
+            y = y + causal_conv(y, self.canon_c)
         return x + self.down(nn.silu(self.gate(y)) * self.up(y)), kv
 
 
@@ -242,8 +278,9 @@ class Inkling(nn.Module):
             return None, lp
         return mx.sum(mx.exp(lp) * (lp - prev_lp), axis=-1, keepdims=True), lp
 
-    def recur(self, e, loops, hard_halt=False, exit_tau=0.0, byte=None):
-        """Run the recurrent core. Returns (state to decode, expected loops per token, per-loop states)."""
+    def recur(self, e, loops, hard_halt=False, exit_tau=0.0, byte=None, collect=None):
+        """Run the recurrent core. Returns (state to decode, expected loops per token, per-loop states).
+        collect: a list that receives each core block's (k, v) from the final loop (SLEEP)."""
         h, states, kvs = e, [], [None] * CORE
         B, T, _ = e.shape
         use_exit = exit_tau > 0 and not HALTING
@@ -270,6 +307,8 @@ class Inkling(nn.Module):
                 x, kv = blk(x, kvs[i] if (KV_SHARE and r > 0) else None)
                 if KV_SHARE and r == 0:
                     kvs[i] = kv
+                if collect is not None and r == loops - 1:
+                    collect.append(kv)
             if use_exit:
                 expected = expected + active[..., 0].astype(mx.float32)
                 x = mx.where(active, x, h)                     # exited tokens keep their exit state
@@ -304,7 +343,39 @@ class Inkling(nn.Module):
             expected = expected + loops
         return h, expected, states
 
+    def sleep_wake(self, x, loops=None):
+        """SLEEP forward. Returns (wake logits, sleep logits, expected passes per byte)."""
+        if CHUNK > 1 or HALTING or KV_SHARE or EXIT_TAU > 0 or DEPTH_ATTN or HISTORY != "none" or LOOP_EMBED:
+            raise ValueError("SLEEP is implemented for the plain looped core only")
+        loops = loops or self.train_loops
+        e = self.emb(x).astype(DTYPE)
+        for blk in self.prelude:                       # the prelude does not loop: identical in both streams
+            e, _ = blk(e)
+        core_kv = []
+        h, _, _ = self.recur(e, loops, collect=core_kv)          # sleep stream: every byte, all loops
+        coda_kv = []
+        for blk in self.coda:
+            h, kv = blk(h)
+            coda_kv.append(kv)
+        sleep_logits = self.head(self.norm(h)).astype(mx.float32)
+        T = x.shape[1]
+        w = mx.arange(T) // SLEEP
+        mem_ok = w[None, :] < w[:, None]                          # slept: earlier windows only
+        own_ok = (w[None, :] == w[:, None]) & (mx.arange(T)[None, :] <= mx.arange(T)[:, None])
+        mask = mx.concatenate([mem_ok, own_ok], axis=1)
+        h = e                                                     # wake stream: one pass (loop 1 has no injection)
+        for blk, (k, v) in zip(self.core, core_kv):
+            h, _ = blk(h, mem=(k, v, mask))
+        for blk, (k, v) in zip(self.coda, coda_kv):
+            h, _ = blk(h, mem=(k, v, mask))
+        wake_logits = self.head(self.norm(h)).astype(mx.float32)
+        expected = mx.full(x.shape, float(loops + 1))             # each byte: one wake pass + `loops` sleep passes
+        return wake_logits, sleep_logits, expected
+
     def forward(self, x, loops=None, hard_halt=False, exit_tau=0.0, return_states=False):
+        if SLEEP > 0 and not return_states:
+            wake, _, expected = self.sleep_wake(x, loops)
+            return wake, expected
         loops = loops or self.train_loops
         h = self.emb(x).astype(DTYPE)
         for blk in self.prelude:
@@ -333,7 +404,15 @@ class Inkling(nn.Module):
     def loss(self, batch, loops, consist_loop=-1):
         """consist_loop: earlier loop (0-based, < loops-1) distilled from the final loop this step; -1 = none.
         It is sampled outside the compiled step (one compiled graph per value), costing ~1 extra coda pass."""
-        if LOOP_CONSIST > 0 and not HALTING and 0 <= consist_loop < loops - 1:
+        dream = 0.0
+        if SLEEP > 0:
+            logits, sleep_logits, expected = self.sleep_wake(batch[:, :-1], loops)
+            consist = 0.0
+            if DREAM > 0:
+                teacher = mx.stop_gradient(mx.softmax(sleep_logits, axis=-1))
+                dream = -mx.sum(teacher * nn.log_softmax(logits, axis=-1), axis=-1).mean() \
+                    + nn.losses.cross_entropy(sleep_logits, batch[:, 1:]).mean()
+        elif LOOP_CONSIST > 0 and not HALTING and 0 <= consist_loop < loops - 1:
             logits, expected, states, byte = self.forward(batch[:, :-1], loops, return_states=True)
             r = consist_loop
             teacher = mx.stop_gradient(mx.softmax(logits, axis=-1))
@@ -350,7 +429,7 @@ class Inkling(nn.Module):
             main = (w * tok).sum() / w.sum()
         else:
             main = ce
-        return main + (PONDER_COST * expected.mean() if HALTING else 0.0) + LOOP_CONSIST * consist, ce
+        return main + (PONDER_COST * expected.mean() if HALTING else 0.0) + LOOP_CONSIST * consist + DREAM * dream, ce
 
 
 # ---------------------------------------------------------------------------

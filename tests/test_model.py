@@ -27,10 +27,14 @@ CASES = {
     "chunk2": {"CHUNK": 2},
     "chunk4": {"CHUNK": 4},
     "chunk4_exit": {"CHUNK": 4, "EXIT_TAU": 0.05, "EXIT_METRIC": "state"},
+    "canon4": {"CANON": 4},
+    "canon4_chunk4": {"CANON": 4, "CHUNK": 4},
+    "sleep16": {"SLEEP": 16},
+    "sleep16_dream_canon": {"SLEEP": 16, "DREAM": 0.5, "CANON": 4},
     "combined": {"DEPTH_ATTN": 2, "HALTING": True, "LOOP_EMBED": True, "KV_SHARE": True},
 }
 # Switches that add parameters but must not change the function at init, so warm-starting is safe.
-NO_OP_AT_INIT = ["depth_attn", "history_gated", "history_mean", "loop_embed", "loop_consist"]
+NO_OP_AT_INIT = ["canon4", "depth_attn", "history_gated", "history_mean", "loop_embed", "loop_consist"]
 
 
 def build(**switches):
@@ -183,3 +187,15 @@ def test_answer_weight_leaves_reported_ce_unweighted():
     train.ANSWER_W = train.FIRST_ANSWER_W = 1.0
     loss1, ce1 = m.loss(x, 4)
     assert abs(ce.item() - ce1.item()) < 1e-6 and abs(loss1.item() - ce1.item()) < 1e-6
+
+
+def test_sleep_wake_reads_only_earlier_windows():
+    """A byte's wake prediction sees sleep states of earlier windows only; editing the current window's
+    earlier bytes still changes it (through the wake stream), and the first window equals a one-pass model's."""
+    train, m = build(SLEEP=16)
+    x = batch(T=48)[:, :-1]
+    wake, sleep, exp = m.sleep_wake(x, 4)
+    assert wake.shape == sleep.shape == (2, 48, 256) and float(exp.mean().item()) == 5.0
+    ref = m.forward(x, loops=1, return_states=True)[0]       # window 0 has nothing slept: one plain pass
+    assert mx.abs(wake[:, :16] - ref[:, :16]).max().item() < 1e-4
+    assert mx.abs(wake[:, 16:] - ref[:, 16:]).max().item() > 1e-3
