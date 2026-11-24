@@ -141,6 +141,7 @@ def main():
     ap.add_argument("--base-hours", type=float, default=6.0)
     ap.add_argument("--control-hours", type=float, default=2.0)
     ap.add_argument("--v2-hours", type=float, default=2.0)
+    ap.add_argument("--v2-set", nargs="*", default=[], metavar="KEY=VALUE", help="overrides for base-v2 (escalation)")
     a = ap.parse_args()
     STATE.mkdir(parents=True, exist_ok=True)
     os.chdir(ROOT)
@@ -154,7 +155,7 @@ def main():
             sys.exit(1)
         mark("base", json.dumps({k: meta("base")[k] for k in ("steps", "train_seconds")}))
     if not done("base-v2"):
-        if not train_ckpt("base-v2", a.v2_hours, extra=["--init", "base", "--lr", "5e-4"]):
+        if not train_ckpt("base-v2", a.v2_hours, overrides=a.v2_set, extra=["--init", "base", "--lr", "5e-4"]):
             sys.exit(1)
         mark("base-v2", json.dumps({k: meta("base-v2")[k] for k in ("steps", "train_seconds")}))
 

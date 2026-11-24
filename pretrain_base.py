@@ -59,6 +59,8 @@ def apply_overrides(pairs):
             raise SystemExit(f"unknown train.py setting {k}")
         out[k] = ast.literal_eval(v)
         setattr(T, k, out[k])
+        if hasattr(P, k):                  # e.g. REASONING_MIX lives in prepare.py (Batches) and train.py (loss mask)
+            setattr(P, k, out[k])
     return out
 
 
