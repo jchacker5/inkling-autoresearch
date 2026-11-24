@@ -73,6 +73,8 @@ def main():
     ap.add_argument("--resume", action="store_true",
                     help="load the last checkpoint and train for the rest of --hours. Optimizer state is not "
                          "saved, so AdamW restarts (with a fresh warm-up) and the cosine schedule spans the remaining time.")
+    ap.add_argument("--init", default=None, metavar="NAME",
+                    help="start from another checkpoint's weights with a fresh schedule (e.g. continue the v1 base on v2 data)")
     a = ap.parse_args()
 
     overrides = apply_overrides(a.set)
@@ -87,6 +89,9 @@ def main():
                 overrides=overrides, d_model=T.D_MODEL, n_heads=T.N_HEADS, prelude=T.PRELUDE, core=T.CORE,
                 coda=T.CODA, loops=T.LOOPS, batch=T.BATCH_SIZE)
     step0, sec0 = 0, 0.0
+    if a.init and not a.resume:
+        T.load_base(model, os.path.join(P.CACHE_DIR, f"{a.init}.safetensors"))
+        meta["init_from"] = a.init
     if a.resume:
         with open(meta_path) as f:
             prev = json.load(f)

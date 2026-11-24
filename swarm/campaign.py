@@ -91,7 +91,7 @@ def meta(name):
     return json.loads(p.read_text()) if p.exists() else None
 
 
-def train_ckpt(name, hours, stop_hours=None, overrides=()):
+def train_ckpt(name, hours, stop_hours=None, overrides=(), extra=()):
     target = (stop_hours or hours) * 3600 - 5
     attempts = 0
     while True:
@@ -107,6 +107,7 @@ def train_ckpt(name, hours, stop_hours=None, overrides=()):
             cmd += ["--stop-hours", str(stop_hours)]
         if overrides:
             cmd += ["--set", *overrides]
+        cmd += list(extra)
         if m:
             cmd.append("--resume")
         with open(ROOT / "results" / f"{name}_pretrain.log", "a") as f:
@@ -133,16 +134,22 @@ def main():
     ap.add_argument("--experiments", type=int, default=5)
     ap.add_argument("--base-hours", type=float, default=6.0)
     ap.add_argument("--control-hours", type=float, default=2.0)
+    ap.add_argument("--v2-hours", type=float, default=2.0)
     a = ap.parse_args()
     STATE.mkdir(parents=True, exist_ok=True)
     os.chdir(ROOT)
     log(f"campaign start: {vars(a)}")
 
-    # 1. base
+    # 1. base (task v1, 6 h; kept for its text ability) and base-v2 = base continued on task-v2 data.
+    #    v1 had a first-digit shortcut that the base learned (README); every warm start uses base-v2.
     if not done("base"):
         if not train_ckpt("base", a.base_hours):
             sys.exit(1)
         mark("base", json.dumps({k: meta("base")[k] for k in ("steps", "train_seconds")}))
+    if not done("base-v2"):
+        if not train_ckpt("base-v2", a.v2_hours, extra=["--init", "base", "--lr", "5e-4"]):
+            sys.exit(1)
+        mark("base-v2", json.dumps({k: meta("base-v2")[k] for k in ("steps", "train_seconds")}))
 
     # 2. baseline seeds
     for s in (0, 1, 2):
@@ -158,14 +165,15 @@ def main():
     # 3. overthinking analysis of the base (eval only, ~15 min)
     if not done("landing-base"):
         wait_for_power()
-        if run(UV, "run", "swarm/landing.py", "--name", "base") == 0:
+        if run(UV, "run", "swarm/landing.py", "--name", "base-v2") == 0:
             mark("landing-base")
 
     # 4. controls and chunked-core models on the same 6-hour schedule, stopped at --control-hours.
     #    These need no agents, so they run before the swarm; the swarm's lanes can then use the
     #    research/debate results (results/next_lanes.txt).
-    controls = {"control-4L": ["LOOPS=1"], "control-10L": ["LOOPS=1", "CORE=8"],
-                "chunk4": ["CHUNK=4"], "chunk2": ["CHUNK=2"]}
+    # All from scratch on task-v2 data, same 6-hour schedule stopped at 2 h. "looped" is the reference.
+    controls = {"looped": [], "control-4L": ["LOOPS=1"], "chunk4": ["CHUNK=4"], "chunk2": ["CHUNK=2"],
+                "control-10L": ["LOOPS=1", "CORE=8"]}
     for name, ov in controls.items():
         if not done(name):
             if train_ckpt(name, a.base_hours, a.control_hours, ov):
@@ -173,7 +181,7 @@ def main():
 
     # 5. evaluations (looped models get the test-time loop sweep and the landing analysis)
     h = int(a.control_hours)
-    evals = [(f"base-{h}h", [], True), ("base", [], True)]
+    evals = [("base-v2", [], True)]
     evals += [(f"{name}-{h}h", ov, "LOOPS=1" not in ov) for name, ov in controls.items()]
     for name, ov, looped in evals:
         step = f"eval-{name}"

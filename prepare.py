@@ -45,7 +45,8 @@ TRAIN_SHARD, VAL_SHARD = 0, 6542
 TRAIN_BYTES_CAP = 256 * 2**20
 VAL_BYTES_CAP = 8 * 2**20
 REASON_TRAIN_BYTES = 16 * 2**20
-BASE_CKPT = os.path.join(CACHE_DIR, "base.safetensors")   # shared warm start, built once by pretrain_base.py
+BASE_NAME = os.environ.get("INKLING_BASE", "base-v2")      # base-v2 = the v1 base continued on task-v2 data
+BASE_CKPT = os.path.join(CACHE_DIR, f"{BASE_NAME}.safetensors")   # shared warm start, built by pretrain_base.py
 DOC_SEP = 0                       # byte 0 separates documents
 
 # ---------------------------------------------------------------------------
