@@ -92,6 +92,22 @@ def wait_for_power():
         time.sleep(60)
 
 
+def head():
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+
+
+START_HEAD = head()
+
+
+def refresh():
+    """Re-exec when the checkout's HEAD moved since this process started. Python keeps the code it loaded, so a
+    long campaign would otherwise run a stale plan (on Nov 24 it trained two controls the round-2 debate dropped)."""
+    now = head()
+    if now and now != START_HEAD:
+        log(f"code changed ({START_HEAD[:7]} -> {now[:7]}); restarting the campaign with the new code")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
 def meta(name):
     p = CACHE / f"{name}.json"
     return json.loads(p.read_text()) if p.exists() else None
@@ -142,6 +158,16 @@ def main():
     ap.add_argument("--control-hours", type=float, default=2.0)
     ap.add_argument("--v2-hours", type=float, default=2.0)
     ap.add_argument("--v2-set", nargs="*", default=[], metavar="KEY=VALUE", help="overrides for base-v2 (escalation)")
+    ap.add_argument("--reason-base", default=None, metavar="NAME",
+                    help="extra base stage that teaches lookup: NAME continues --reason-init with --reason-set; every "
+                         "warm start then uses it (INKLING_BASE)")
+    ap.add_argument("--reason-init", default="base-v2")
+    ap.add_argument("--reason-hours", type=float, default=1.0)
+    ap.add_argument("--reason-lr", default="5e-4")
+    ap.add_argument("--reason-set", nargs="*", default=[], metavar="KEY=VALUE")
+    ap.add_argument("--gate-hop0", type=float, default=0.40,
+                    help="reasoning gate: per-question hop-0 accuracy the warm-start base needs (chance .10) before "
+                         "reasoning controls and the swarm run")
     a = ap.parse_args()
     STATE.mkdir(parents=True, exist_ok=True)
     os.chdir(ROOT)
@@ -158,23 +184,42 @@ def main():
         if not train_ckpt("base-v2", a.v2_hours, overrides=a.v2_set, extra=["--init", "base", "--lr", "5e-4"]):
             sys.exit(1)
         mark("base-v2", json.dumps({k: meta("base-v2")[k] for k in ("steps", "train_seconds")}))
+    refresh()
+    warm = "base-v2"
+    if a.reason_base:
+        warm = a.reason_base
+        if not done(warm):
+            if not train_ckpt(warm, a.reason_hours, overrides=a.reason_set,
+                              extra=["--init", a.reason_init, "--lr", a.reason_lr]):
+                sys.exit(1)
+            mark(warm, json.dumps({k: meta(warm)[k] for k in ("steps", "train_seconds")}))
+        os.environ["INKLING_BASE"] = warm          # inherited by run.py, landing.py and the swarm
+    refresh()
+
+    # Reasoning gate. With no lookup, every kappa is at its floor and screening compares zeros (Nov 24: three
+    # baseline seeds all at kappa -0.067), so the reasoning lanes and controls would only burn GPU hours.
+    m = meta(warm) or {}
+    hop0 = (m.get("reasoning_single_quick") or {}).get("0", (m.get("reasoning_quick") or {}).get("0", 0.0))
+    gate_ok = hop0 >= a.gate_hop0
+    log(f"reasoning gate on {warm}: hop-0 per-question accuracy {hop0:.3f} (need {a.gate_hop0}) -> "
+        + ("pass" if gate_ok else "FAIL: text-only controls (looped, control-4L), no swarm"))
 
     # 2. baseline seeds: the pooled screening reference for every verdict (program.md), then the noise report
-    for s in BASELINE_SEEDS:
-        if not done(f"baseline-{s}"):
+    for s in BASELINE_SEEDS if gate_ok else ():
+        if not done(f"baseline-{warm}-{s}") and not (warm == "base-v2" and done(f"baseline-{s}")):
             wait_for_power()
             run(UV, "run", "swarm/run.py", "--lane", "baseline", "--seed", str(s), "--desc", f"baseline seed {s}",
                 "--hypothesis", "noise floor: base + 5 min of unchanged training")
-            mark(f"baseline-{s}")
-    if not done("noise"):
+            mark(f"baseline-{warm}-{s}")
+    if gate_ok and not done(f"noise-{warm}"):
         run(UV, "run", "swarm/status.py", "--noise")
-        mark("noise")
+        mark(f"noise-{warm}")
 
     # 3. overthinking analysis of the base (eval only, ~15 min)
-    if not done("landing-base"):
+    if not done(f"landing-{warm}") and not (warm == "base-v2" and done("landing-base")):
         wait_for_power()
-        if run(UV, "run", "swarm/landing.py", "--name", "base-v2") == 0:
-            mark("landing-base")
+        if run(UV, "run", "swarm/landing.py", "--name", warm) == 0:
+            mark(f"landing-{warm}")
 
     # 4. controls and chunked-core models on the same 6-hour schedule, stopped at --control-hours.
     #    These need no agents, so they run before the swarm; the swarm's lanes can then use the
@@ -184,14 +229,17 @@ def main():
     # every cost); "looped-unweighted" tests whether the answer weighting is what creates lookup.
     controls = {"looped": [], "control-4L": ["LOOPS=1"], "chunk4": ["CHUNK=4"],
                 "looped-unweighted": ["ANSWER_W=1.0", "FIRST_ANSWER_W=1.0"]}
+    if not gate_ok:                                  # debater 2's fallback: only the text-side comparison
+        controls = {k: v for k, v in controls.items() if k in ("looped", "control-4L")}
     for name, ov in controls.items():
+        refresh()
         if not done(name):
             if train_ckpt(name, a.base_hours, a.control_hours, ov):
                 mark(name)
 
     # 5. evaluations (looped models get the test-time loop sweep and the landing analysis)
     h = int(a.control_hours)
-    evals = [("base-v2", [], True)]
+    evals = [(warm, [], True)]
     evals += [(f"{name}-{h}h", ov, "LOOPS=1" not in ov) for name, ov in controls.items()]
     for name, ov, looped in evals:
         step = f"eval-{name}"
@@ -210,6 +258,10 @@ def main():
     nl = ROOT / "results" / "next_lanes.txt"
     if nl.exists() and nl.read_text().split():
         lanes = nl.read_text().split()
+    if not gate_ok:
+        log("reasoning gate failed: stopping before the swarm")
+        return
+    refresh()
     if not done("swarm"):
         if subprocess.run(["pgrep", "-f", "swarm/launch.sh"], capture_output=True).returncode == 0:
             log("swarm already running (campaign restarted); waiting for it")

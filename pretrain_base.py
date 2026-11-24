@@ -40,14 +40,14 @@ def quick_eval(model):
     import mlx.nn as nn
     rng = np.random.default_rng(7)
     sets = {h: P.eval_problems(rng, h, 100) for h in HOPS}
-    acc = P._reasoning_acc(model, sets, None, mx)
+    acc, single = P._reasoning_acc(model, sets, None, mx, return_single=True)
     keep = P.VAL_WINDOWS
     P.VAL_WINDOWS = 64
     bpb = P._val_bpb(model, None, mx, nn)
     P.VAL_WINDOWS = keep
     mx.clear_cache()                       # eval shapes differ from training; do not keep their buffers
     model.train()
-    return bpb, acc
+    return bpb, acc, single
 
 
 def apply_overrides(pairs):
@@ -110,7 +110,8 @@ def main():
     progress = os.path.join(P.CACHE_DIR, f"{a.name}_progress.tsv")
     if not os.path.exists(progress):
         with open(progress, "w") as f:
-            f.write("train_min\tsteps\tval_bpb\t" + "\t".join(f"hop{h}" for h in HOPS) + "\n")
+            f.write("train_min\tsteps\tval_bpb\t" + "\t".join(f"hop{h}" for h in HOPS) + "\t"
+                    + "\t".join(f"s{h}" for h in HOPS) + "\n")     # hopN: group (quad) accuracy; sN: per question
     every = a.every_min * 60
     next_ck = [math.floor(sec0 / every + 1e-6) * every + every]      # checkpoints on absolute 15-min marks
     snap_done = [int(sec0 // 3600)]
@@ -123,11 +124,12 @@ def main():
             return
         while next_ck[0] <= t_train:
             next_ck[0] += every
-        bpb, acc = quick_eval(model)
+        bpb, acc, single = quick_eval(model)
         tmp = ckpt + ".tmp.safetensors"
         model.save_weights(tmp)
         os.replace(tmp, ckpt)
-        meta.update(steps=step, train_seconds=t_train, val_bpb_quick=bpb, reasoning_quick={str(k): v for k, v in acc.items()})
+        meta.update(steps=step, train_seconds=t_train, val_bpb_quick=bpb, reasoning_quick={str(k): v for k, v in acc.items()},
+                    reasoning_single_quick={str(k): v for k, v in single.items()})
         with open(meta_path, "w") as f:
             json.dump(meta, f, indent=2)
         hour = int((t_train + 1) // 3600)
@@ -135,7 +137,8 @@ def main():
             shutil.copyfile(ckpt, ckpt.replace(".safetensors", f"-{hour}h.safetensors"))
             shutil.copyfile(meta_path, meta_path.replace(".json", f"-{hour}h.json"))
             snap_done[0] = hour
-        line = f"{t_train/60:.1f}\t{step}\t{bpb:.4f}\t" + "\t".join(f"{acc[h]:.3f}" for h in HOPS)
+        line = f"{t_train/60:.1f}\t{step}\t{bpb:.4f}\t" + "\t".join(f"{acc[h]:.3f}" for h in HOPS) + "\t" \
+            + "\t".join(f"{single[h]:.3f}" for h in HOPS)
         with open(progress, "a") as f:
             f.write(line + "\n")
         print("CHECKPOINT " + line, flush=True)
