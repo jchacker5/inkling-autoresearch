@@ -149,3 +149,25 @@ def test_chunk_readouts_equal_truncated_runs():
     x = batch()[:, :-1]
     for r, lo in enumerate(m.loop_readouts(x, 3)):
         assert mx.abs(lo - m(x, loops=r + 1)).max().item() < 1e-4
+
+
+def test_answer_mask_marks_only_answer_digits_after_a_newline():
+    import train
+    importlib.reload(train)
+    row = b"x;?q=5\na=3;b=a;?b=3?a=3\n?c=7"
+    x = np.frombuffer(row, dtype=np.uint8).astype(np.int32)
+    batch = mx.array(np.stack([x] * 32))
+    m = np.array(train.answer_mask(batch))
+    tgt = row[1:]
+    hits = [i for i in range(len(tgt)) if m[0, i]]
+    assert [chr(tgt[i]) for i in hits] == ["3", "3", "7"]     # "?q=5" precedes the first newline: excluded
+    assert not m[8:].any()                                   # text rows (>= mix) never weighted
+
+
+def test_answer_weight_leaves_reported_ce_unweighted():
+    train, m = build(ANSWER_W=10.0)
+    x = batch()
+    loss, ce = m.loss(x, 4)
+    train.ANSWER_W = 1.0
+    loss1, ce1 = m.loss(x, 4)
+    assert abs(ce.item() - ce1.item()) < 1e-6 and abs(loss1.item() - ce1.item()) < 1e-6

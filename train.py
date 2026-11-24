@@ -27,7 +27,7 @@ import mlx.optimizers as optim
 import numpy as np
 from mlx.utils import tree_flatten
 
-from prepare import BASE_CKPT, SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, Batches, evaluate
+from prepare import BASE_CKPT, REASONING_MIX, SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, Batches, evaluate
 
 # MLX keeps freed GPU buffers for reuse. With the variable-length eval batches that cache grew to 15 GB during
 # the 6-hour base run, pushed macOS into swap and filled the disk until the kernel killed training. Cap it.
@@ -57,6 +57,8 @@ EXIT_TAU = 0.0                     # eval only: >0 freezes a token once its loop
 EXIT_METRIC = "kl"                 # "kl": KL(new || previous readout through coda+head); "state": relative L2 change
 LOOP_CONSIST = 0.0                 # train: weight of soft CE from final-loop readout to one random earlier loop
 CHUNK = 1                          # >1: core runs on K-byte chunks (changes the architecture; new base needed)
+ANSWER_W = 10.0                    # loss weight on reasoning answer digits ("?v=D"); answers are ~2.4% of the
+                                   # loss unweighted, ~20% at 10. The reported ce stays unweighted.
 
 INIT_FROM_BASE = True              # continue from the shared base checkpoint (see pretrain_base.py)
 BATCH_SIZE = 32
@@ -130,6 +132,22 @@ class DepthAttention(nn.Module):
         q = self.q(self.n(h))[:, :, None, :]                           # B,T,1,dk
         w = mx.softmax((q * self.k(S)).sum(-1) / math.sqrt(self.dk), axis=-1)  # B,T,K
         return h + self.o((w[..., None] * self.v(S)).sum(2))
+
+
+def answer_mask(batch):
+    """(B, T) bool over targets: the digit after "?<letter>=" in a reasoning row (rows [0, mix) of Batches),
+    only once the row has seen a newline, so the line's statements are inside the window (answers in a line
+    cut off at the window start are unpredictable noise)."""
+    x, y = batch[:, :-1], batch[:, 1:]
+    B, T = x.shape
+    eq = x == ord("=")
+    letter = mx.concatenate([mx.zeros((B, 1), dtype=mx.bool_), (x[:, :-1] >= ord("a")) & (x[:, :-1] <= ord("z"))], axis=1)
+    qm = mx.concatenate([mx.zeros((B, 2), dtype=mx.bool_), x[:, :-2] == ord("?")], axis=1)
+    digit = (y >= ord("0")) & (y <= ord("9"))
+    seen_nl = mx.cummax((x == ord("\n")).astype(mx.int32), axis=1) > 0
+    mix = max(1, round(REASONING_MIX * B / 32))
+    rows = mx.arange(B)[:, None] < mix
+    return eq & letter & qm & digit & seen_nl & rows
 
 
 def loop_features(r, d):
@@ -300,8 +318,14 @@ class Inkling(nn.Module):
         else:
             logits, expected = self.forward(batch[:, :-1], loops)
             consist = 0.0
-        ce = nn.losses.cross_entropy(logits, batch[:, 1:]).mean()
-        return ce + (PONDER_COST * expected.mean() if HALTING else 0.0) + LOOP_CONSIST * consist, ce
+        tok = nn.losses.cross_entropy(logits, batch[:, 1:])
+        ce = tok.mean()
+        if ANSWER_W != 1.0:
+            w = 1.0 + (ANSWER_W - 1.0) * answer_mask(batch).astype(tok.dtype)
+            main = (w * tok).sum() / w.sum()
+        else:
+            main = ce
+        return main + (PONDER_COST * expected.mean() if HALTING else 0.0) + LOOP_CONSIST * consist, ce
 
 
 # ---------------------------------------------------------------------------
