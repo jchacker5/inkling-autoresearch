@@ -110,45 +110,26 @@ analytical compute measure until someone implements real token skipping.
 
 ## Research lanes
 
-Each lane is one hypothesis family. In a swarm each agent owns one lane. Alone, work them top to bottom.
+Each lane is one hypothesis family; in a swarm each agent owns one lane. These four came out of the round-2
+research debate (research/04-debate-r2-*.md). The primary metric is `kappa_id` (pair accuracy above the .25
+structure-plus-coin-flip bound). Every lane reports `kappa_ood`, `val_bpb` and `bytes_f` too.
 
-1. **depth-attn** (ARLoop-style). `DEPTH_ATTN=K`: each loop attends per-token over the last K loop states.
-   Try K in {2,3,4}, `DEPTH_ATTN_DIM`, attention before vs after the core blocks, and replacing input
-   injection with depth attention. Hypothesis: better `reason_ood` at equal params, small latency cost.
-2. **halting** (Mixture-of-Recursions / ACT). `HALTING=True`. Sweep `PONDER_COST`, the router bias init,
-   `HALT_THRESHOLD`, `LOOPS` up to 8. The matched-compute comparison is the point: adaptive at mean loops m
-   vs fixed loops = round(m). Hypothesis: same `val_bpb` at fewer mean loops, and more loops on deep hops.
-   Check `reason_by_hop` vs loops used.
-3. **history** (history-aware recurrence). `HISTORY` in {mean, gated}, `LOOP_EMBED`. The target failure is
-   overthinking: `val_bpb` getting worse at 2x loops. Hypothesis: flatter `scaling` curves with no
-   knowledge loss.
-4. **kv-reuse** (fixed-point / shared KV). `KV_SHARE=True` cuts KV by about 2.5x. Find the variant that keeps
-   quality: share from the last loop instead of the first, share only K, or measure state convergence
-   (||h_r - h_{r-1}|| / ||h_r||) and reuse once converged. Hypothesis: much smaller cache, negligible quality loss.
-5. **recipe** (fair baseline). Before crediting any architecture, tune the continued-training recipe:
-   LR, warmup, batch, `RANDOM_LOOPS` (Huginn-style, needed for test-time scaling), `BPTT_LOOPS`, bf16
-   params via `model.set_dtype` (1.4x throughput, measured), and Muon via `mlx.optimizers.Muon`. Every
-   other lane's win is measured against this lane's best, so it must not be weak. A NON-looped control
-   at the same unique-param count belongs in the paper, and needs its own base (a human decision).
-6. **overthinking** (utility-based exit; TRACE, Zhang et al.). Most tokens do not need every loop: run
-   `uv run swarm/landing.py --name base` first. It reports, per hop and for text bytes, the loop after which
-   the prediction stops changing ("landing"), the share of loops spent after landing, and "flips" (right at
-   an earlier loop, wrong at the end). Then: `EXIT_TAU` (training-free; a token stops once one more loop
-   changes its readout by less than tau, `EXIT_METRIC` kl or state) and `LOOP_CONSIST` (self-distil the
-   final loop into a random earlier loop so early exits lose less). Report mean loops per token next to
-   accuracy; a win is equal `reason_id`/`reason_ood` and `val_bpb` at fewer mean loops, or better accuracy at
-   2x loops (no destructive overthinking). Frozen tokens are still computed in this implementation, so
-   claim loop savings, not wall-clock savings, until a sparse kernel exists.
-7. **chunked-core** (after CALM, arXiv 2510.27688). `CHUNK=K` runs the core on K-byte chunks: the byte
-   prelude is pooled K-to-1, the core loops over T/K positions, and its output is shifted one chunk and
-   unpooled into a byte-level coda, so bits per byte stays exact and the model stays causal. Core FLOPs and KV
-   cache per byte fall by K, so the same budget buys more loops or width. It is a new architecture: the campaign
-   trains `chunk2`/`chunk4` bases on the 6-hour schedule stopped at 2 h and compares them with `base-2h`.
-   Lane work, once a chunk base exists: point `BASE_CKPT` at it, then test more loops, a wider core at equal
-   FLOPs, and a 2-block coda.
-8. **parallel-recurrence** (LoopFold-style): phase 2, inference only. Predict later loop states, run them
-   in parallel and correct them. Only start once lanes 1-4 have a confirmed model. Measure real wall clock
-   with MLX, not FLOPs.
+1. **binding** (does the model read the question?). Levers: `ANSWER_W` and `FIRST_ANSWER_W`, the reasoning share
+   of the batch, and the data order within a line (`prepare.py` is fixed, so propose data changes in your notes
+   rather than editing it). Target: hop-0/1/2 pair accuracy well above .25. Until this lane works, no other
+   lane may claim a reasoning gain.
+2. **recipe** (fair warm-start baseline). Recipe R's LR grid (`R_LR`, `R_LR_NEW`, `R_LR_NEW_VEC`), warm-up and
+   decay fraction, bf16 parameters (fp32 master weights only), Muon. Every other lane's win is measured against
+   this lane's best, so it must not be weak.
+3. **depth** (do more loops buy deeper hops?). `RANDOM_LOOPS`, `BPTT_LOOPS`, `DEPTH_ATTN`, `LOOP_EMBED`,
+   `HISTORY`, and a zero-init carry gate. The claim to test: pair accuracy at hops 8-10 rises with test-time
+   loops (`scaling`), and `val_bpb` does not get worse at 2x loops.
+4. **exit** (overthinking; TRACE, CALM). `EXIT_TAU`/`EXIT_METRIC` (training-free) and `LOOP_CONSIST`. Run
+   `swarm/landing.py` first. A win is equal `kappa` and `val_bpb` at fewer mean loops. Exited tokens are still
+   computed (dense masking), so claim loops saved, not time saved.
+
+Older switches (`HALTING`, `KV_SHARE`, `CHUNK`) remain available; `CHUNK=4` is judged by the campaign's 2-hour
+from-scratch comparison against `control-4L` and `looped`, not by warm starts.
 
 ## The loop
 

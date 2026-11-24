@@ -179,8 +179,10 @@ def main():
     #    These need no agents, so they run before the swarm; the swarm's lanes can then use the
     #    research/debate results (results/next_lanes.txt).
     # All from scratch on task-v2 data, same 6-hour schedule stopped at 2 h. "looped" is the reference.
-    controls = {"looped": [], "control-4L": ["LOOPS=1"], "chunk4": ["CHUNK=4"], "chunk2": ["CHUNK=2"],
-                "control-10L": ["LOOPS=1", "CORE=8"]}
+    # Round-2 debate: control-10L dropped (17.9M params, over the 12M cap); chunk2 dropped (control-4L beats it on
+    # every cost); "looped-unweighted" tests whether the answer weighting is what creates lookup.
+    controls = {"looped": [], "control-4L": ["LOOPS=1"], "chunk4": ["CHUNK=4"],
+                "looped-unweighted": ["ANSWER_W=1.0", "FIRST_ANSWER_W=1.0"]}
     for name, ov in controls.items():
         if not done(name):
             if train_ckpt(name, a.base_hours, a.control_hours, ov):
