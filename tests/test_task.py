@@ -56,3 +56,19 @@ def test_eval_set_is_fixed_and_disjoint_in_seed():
     a, b = P.reasoning_eval_set(), P.reasoning_eval_set()
     assert a == b
     assert set(a) == set(P.EVAL_HOPS_ID + P.EVAL_HOPS_OOD)
+
+
+def test_v2_has_no_position_shortcut_and_fixed_size():
+    """Regression for the v1 shortcut: the first digit scored ~.5 at every hop. v2 must stay near 1/#roots."""
+    sets = P.reasoning_eval_set()
+    for h, probs in sets.items():
+        assert all(len(p.split(";")) - 1 == P.TASK_VARS for p, _ in probs)
+        assert P.position_floor(probs) < 0.30, (h, P.position_floor(probs))
+
+
+def test_root_digits_are_distinct():
+    rng = np.random.default_rng(3)
+    for hops in range(0, 13):
+        prompt, _ = P.make_problem(rng, hops)
+        digits = re.findall(r"\d", prompt)
+        assert len(digits) == len(set(digits))

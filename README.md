@@ -19,16 +19,12 @@ fairly. "Inkling" is the working name of the model family.
 - The paper is being written in [`paper/`](paper/): the setup and calibration sections are drafted, and the
   results sections will be filled from the overnight campaign (`swarm/campaign.py`).
 
-How the base is doing so far (exact match on the variable-tracking task, 100 problems per hop, chance = 10%):
-
-| training | steps | val_bpb | hop 0 | hop 1 | hop 2 | hop 4 | hop 6 | hop 8 (unseen) |
-|---|---|---|---|---|---|---|---|---|
-| 15 min | 763 | 2.079 | 33% | 52% | 35% | 29% | 27% | 11% |
-| 30 min | 1,522 | 1.931 | 43% | 54% | 41% | 39% | 24% | 16% |
-| 45 min | 2,277 | 1.799 | 40% | 49% | 42% | 41% | 33% | 18% |
-
-Accuracy falls with chain length, which is the depth-limited behaviour that loop experiments are meant
-to change.
+**The first reasoning task (v1) had a shortcut, and the first 6-hour base learned it.** In v1 the chain's
+starting variable was the first statement about half the time, so answering with the prompt's first digit
+scored .48-.57 at every hop. The base's scores (.44-.54 at every hop, 6 hours of training) match that rule, not
+pointer chasing. Task v2 (`prepare.py`) uses 20 variables at every hop, distinct root digits and a random
+topological order. Its position floor is .13-.19, and `evaluate()` reports it as `reason_floor_id/ood`.
+Bases trained on v1 data are not comparable to v2 results.
 
 ## How it works
 

@@ -13,6 +13,7 @@ Everything in this file is FIXED. Agents edit train.py only. The harness defines
 import json
 import math
 import os
+import re
 import sys
 import time
 
@@ -31,6 +32,7 @@ TRAIN_HOPS = (0, 6)               # inclusive hop range seen in training
 EVAL_HOPS_ID = (2, 4, 6)          # in-distribution evaluation hops
 EVAL_HOPS_OOD = (8, 10)           # out-of-distribution (deeper) hops
 EVAL_PER_HOP = 400
+TASK_VARS = 20                    # variables per problem at every hop: OOD means deeper, not also more crowded
 VAL_WINDOWS = 384                 # 384 * 512 = ~197k scored bytes
 
 SMOKE = os.environ.get("INKLING_SMOKE") == "1"   # tiny budget for harness tests; never log as a result
@@ -51,37 +53,59 @@ DOC_SEP = 0                       # byte 0 separates documents
 # ---------------------------------------------------------------------------
 # Variable tracking over a forest of pointer chains (RULER-style VT, made dense):
 #     "q=4;k=q;x=7;b=k;y=x;?b=4?y=7?q=4?k=4?x=7\n"
-# One chain of exactly `hops` pointer steps is interleaved with distractor variables that are digits or
-# point at earlier distractors (never deeper than `hops`). Training lines query every variable, so every
-# answer byte is a learnable target. Evaluation asks only the deepest chain: "<statements>;?b=" -> "4".
-# Each hop is one more serial lookup, so deeper chains need more computation, which is what recurrent
-# depth is supposed to buy. Chance is 10%.
+# One chain of exactly `hops` pointer steps (TASK_VARS variables in all) is mixed with distractor trees.
+# Evaluation asks only the chain's end: "<statements>;?b=" -> "4". Each hop is one more serial lookup.
+#
+# Task v2 (2026-11-24). v1 put the chain's root in the first statement about half the time, so answering
+# with the prompt's first digit scored .48-.57 at every hop, and the 6-hour base had learned that shortcut
+# instead of pointer chasing. v2 removes position and frequency shortcuts:
+#   - every problem has TASK_VARS variables, so hop depth is not confounded with the number of distractors;
+#   - root digits are distinct (at most 10 roots), so "copy some digit" scores 1/#roots;
+#   - statements are a uniformly random topological order (parents still precede children), so the chain's
+#     root is at a random root position;
+#   - distractors never hang off the chain, so the chain's value is not the most common value by design.
+# `reason_floor` in evaluate() reports the best position heuristic (first/last digit) on the eval set itself.
 _LETTERS = "abcdefghijklmnopqrstuvwxyz"
 
 
 def _forest(rng, hops):
-    n_dist = min(hops + 2, 25 - hops)
-    names = list(rng.permutation(list(_LETTERS))[: hops + 1 + n_dist])
+    names = list(rng.permutation(list(_LETTERS))[:TASK_VARS])
     chain, distract = names[: hops + 1], names[hops + 1:]
-    is_chain = set(np.sort(rng.choice(len(names), hops + 1, replace=False)).tolist())
-    stmts, val, depth, ci, di, emitted = [], {}, {}, 0, 0, []
-    for pos in range(len(names)):
-        if pos in is_chain:
-            v = chain[ci]
-            if ci == 0:
-                val[v], depth[v] = int(rng.integers(0, 10)), 0; stmts.append(f"{v}={val[v]}")
-            else:
-                p = chain[ci - 1]; val[v], depth[v] = val[p], ci; stmts.append(f"{v}={p}")
-            ci += 1
+    cap = max(hops, 3)                                 # distractor depth limit
+    parent, depth = {chain[0]: None}, {chain[0]: 0}
+    for i in range(1, hops + 1):
+        parent[chain[i]], depth[chain[i]] = chain[i - 1], i
+    roots, built = [chain[0]], []
+    for v in distract:
+        ok = [u for u in built if depth[u] < cap]
+        if ok and (len(roots) >= 10 or rng.random() < 0.5):
+            p = ok[int(rng.integers(len(ok)))]
+            parent[v], depth[v] = p, depth[p] + 1
         else:
-            v = distract[di]; di += 1
-            ok = [u for u in emitted if depth[u] < hops]
-            if ok and rng.random() < 0.5:
-                p = ok[int(rng.integers(0, len(ok)))]; val[v], depth[v] = val[p], depth[p] + 1; stmts.append(f"{v}={p}")
-            else:
-                val[v], depth[v] = int(rng.integers(0, 10)), 0; stmts.append(f"{v}={val[v]}")
-            emitted.append(v)
+            parent[v], depth[v] = None, 0
+            roots.append(v)
+        built.append(v)
+    assert len(roots) <= 10
+    digit = dict(zip(roots, rng.permutation(10)[: len(roots)].tolist()))
+    kids = {v: [] for v in names}
+    for v, p in parent.items():
+        if p is not None:
+            kids[p].append(v)
+    avail, stmts, val = list(roots), [], {}
+    while avail:                                       # random topological order
+        v = avail.pop(int(rng.integers(len(avail))))
+        p = parent[v]
+        val[v] = digit[v] if p is None else val[p]
+        stmts.append(f"{v}={digit[v]}" if p is None else f"{v}={p}")
+        avail += kids[v]
     return ";".join(stmts), chain[-1], val
+
+
+def position_floor(probs):
+    """Best accuracy of answering with the prompt's first or last digit (no pointer following)."""
+    first = np.mean([re.findall(r"\d", p)[0] == a for p, a in probs])
+    last = np.mean([re.findall(r"\d", p)[-1] == a for p, a in probs])
+    return float(max(first, last))
 
 
 def make_problem(rng, hops):
@@ -155,7 +179,7 @@ def prepare():
         arr.tofile(out)
         os.remove(pq_path)            # disk is precious; the .bin is all we need
         print(f"wrote {out}: {len(arr)/2**20:.1f} MiB")
-    out = os.path.join(CACHE_DIR, "reason_train.bin")
+    out = os.path.join(CACHE_DIR, "reason_train_v2.bin")
     if not os.path.exists(out):
         _reasoning_stream(1234, REASON_TRAIN_BYTES).tofile(out)
         print(f"wrote {out}")
@@ -176,7 +200,7 @@ class Batches:
     """Infinite iterator of (B, SEQ_LEN+1) uint8 windows. Rows [0, mix) are reasoning, the rest text."""
 
     def __init__(self, batch_size, seed=0):
-        self.text, self.reason = _load("train"), _load("reason_train")
+        self.text, self.reason = _load("train"), _load("reason_train_v2")
         self.B = batch_size
         self.mix = max(1, round(REASONING_MIX * batch_size / 32))
         self.rng = np.random.default_rng(seed)
@@ -264,6 +288,10 @@ def evaluate(model, train_info):
     res["reason_id"] = float(np.mean([acc[h] for h in EVAL_HOPS_ID]))
     res["reason_ood"] = float(np.mean([acc[h] for h in EVAL_HOPS_OOD]))
     res["reason_by_hop"] = acc
+    floor = {h: position_floor(p) for h, p in sets.items()}
+    res["reason_floor_by_hop"] = floor
+    res["reason_floor_id"] = float(np.mean([floor[h] for h in EVAL_HOPS_ID]))
+    res["reason_floor_ood"] = float(np.mean([floor[h] for h in EVAL_HOPS_OOD]))
     res["mean_loops_per_token"] = getattr(model, "mean_loops_per_token", base_loops)
 
     # Test-time scaling: same weights, more (and fewer) loops. Only for models that accept loops=.
@@ -302,7 +330,7 @@ def evaluate(model, train_info):
         json.dump(res, f, indent=2, default=str)
 
     print("---")
-    for k in ("val_bpb", "reason_id", "reason_ood", "mean_loops_per_token", "params", "weights_mb_bf16",
+    for k in ("val_bpb", "reason_id", "reason_ood", "reason_floor_id", "reason_floor_ood", "mean_loops_per_token", "params", "weights_mb_bf16",
               "kv_kb_per_token", "latency_ms_b1", "peak_mem_gb", "training_seconds", "steps", "tokens_M", "valid"):
         v = res.get(k)
         print(f"{k + ':':22s}{v:.6f}" if isinstance(v, float) else f"{k + ':':22s}{v}")
