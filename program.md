@@ -102,7 +102,16 @@ Each lane is one hypothesis family. In a swarm each agent owns one lane. Alone, 
    params via `model.set_dtype` (1.4x throughput, measured), and Muon via `mlx.optimizers.Muon`. Every
    other lane's win is measured against this lane's best, so it must not be weak. A NON-looped control
    at the same unique-param count belongs in the paper, and needs its own base (a human decision).
-6. **parallel-recurrence** (LoopFold-style): phase 2, inference only. Predict later loop states, run them
+6. **overthinking** (utility-based exit; TRACE, Zhang et al.). Most tokens do not need every loop: run
+   `uv run swarm/landing.py --name base` first. It reports, per hop and for text bytes, the loop after which
+   the prediction stops changing ("landing"), the share of loops spent after landing, and "flips" (right at
+   an earlier loop, wrong at the end). Then: `EXIT_TAU` (training-free; a token stops once one more loop
+   changes its readout by less than tau, `EXIT_METRIC` kl or state) and `LOOP_CONSIST` (self-distil the
+   final loop into a random earlier loop so early exits lose less). Report mean loops per token next to
+   accuracy; a win is equal `reason_id`/`reason_ood` and `val_bpb` at fewer mean loops, or better accuracy at
+   2x loops (no destructive overthinking). Frozen tokens are still computed in this implementation, so
+   claim loop savings, not wall-clock savings, until a sparse kernel exists.
+7. **parallel-recurrence** (LoopFold-style): phase 2, inference only. Predict later loop states, run them
    in parallel and correct them. Only start once lanes 1-4 have a confirmed model. Measure real wall clock
    with MLX, not FLOPs.
 

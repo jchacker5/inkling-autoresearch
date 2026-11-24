@@ -8,6 +8,10 @@ Experiment switches below map to the research directions in program.md:
   HISTORY         history-state injection across loops                     (history-aware recurrence)
   LOOP_EMBED      loop-index (timestep) conditioning                       (history-aware recurrence)
   KV_SHARE        core loops >1 reuse loop-1 keys/values: smaller KV cache (fixed-point / KV reuse)
+  EXIT_TAU        training-free early exit: a token stops looping once one more loop
+                  changes its prediction by < tau (utility-based, TRACE-style overthinking cut)
+  LOOP_CONSIST    self-distillation: earlier loops learn to predict the final loop's output,
+                  so early exits lose less (cf. Shallow-Deep Networks, CALM)
 Usage: uv run train.py > run.log 2>&1
 """
 import math
@@ -42,6 +46,9 @@ HALTING = False                    # per-token ACT-style halting (dense in train
 PONDER_COST = 0.01                 # penalty per expected loop (in nats)
 HALT_THRESHOLD = 0.5               # eval: token freezes once cumulative halt prob crosses this
 KV_SHARE = False                   # core loops >1 attend with loop-1 K/V (KV cache ~ 1 loop)
+EXIT_TAU = 0.0                     # eval only: >0 freezes a token once its loop-to-loop change falls below tau
+EXIT_METRIC = "kl"                 # "kl": KL(new || previous readout through coda+head); "state": relative L2 change
+LOOP_CONSIST = 0.0                 # train: weight of soft CE from final-loop readout to one random earlier loop
 
 INIT_FROM_BASE = True              # continue from the shared base checkpoint (see pretrain_base.py)
 BATCH_SIZE = 32
@@ -151,10 +158,29 @@ class Inkling(nn.Module):
         core_layers = CORE * (1 if KV_SHARE else self.train_loops)
         return 2 * D_MODEL * 2 * (PRELUDE + core_layers + CODA)   # K and V, bf16
 
-    def recur(self, e, loops, hard_halt=False):
-        """Run the recurrent core. Returns (state to decode, expected loops per token)."""
+    def readout(self, h):
+        """Decode a loop state through the coda and head (an exact 'stop after this loop' logit lens)."""
+        for blk in self.coda:
+            h, _ = blk(h)
+        return self.head(self.norm(h)).astype(mx.float32)
+
+    def _change(self, x, h, prev_lp):
+        """Per-token change from one loop to the next. Returns (change (B,T,1), log-probs of x's readout)."""
+        if EXIT_METRIC == "state":
+            num = mx.sqrt(mx.sum(mx.square((x - h).astype(mx.float32)), axis=-1, keepdims=True))
+            den = mx.sqrt(mx.sum(mx.square(h.astype(mx.float32)), axis=-1, keepdims=True)) + 1e-6
+            return num / den, None
+        lp = nn.log_softmax(self.readout(x), axis=-1)
+        if prev_lp is None:
+            return None, lp
+        return mx.sum(mx.exp(lp) * (lp - prev_lp), axis=-1, keepdims=True), lp
+
+    def recur(self, e, loops, hard_halt=False, exit_tau=0.0):
+        """Run the recurrent core. Returns (state to decode, expected loops per token, per-loop states)."""
         h, states, kvs = e, [], [None] * CORE
         B, T, _ = e.shape
+        use_exit = exit_tau > 0 and not HALTING
+        prev_lp = None
         active = mx.ones((B, T, 1), dtype=mx.bool_)          # hard halting: tokens still computing
         remain = mx.ones((B, T, 1), dtype=mx.float32)        # soft halting: prob mass not yet halted
         out = mx.zeros_like(e)
@@ -175,6 +201,16 @@ class Inkling(nn.Module):
                 x, kv = blk(x, kvs[i] if (KV_SHARE and r > 0) else None)
                 if KV_SHARE and r == 0:
                     kvs[i] = kv
+            if use_exit:
+                expected = expected + active[..., 0].astype(mx.float32)
+                x = mx.where(active, x, h)                     # exited tokens keep their exit state
+                if r < loops - 1:
+                    d, prev_lp = self._change(x, h, prev_lp)
+                    if d is not None and r > 0:                # r=0 compares against the prelude output: skip
+                        active = active & (d >= exit_tau)
+                h = x
+                states.append(h)
+                continue
             if not HALTING:
                 h = x
                 states.append(h)
@@ -194,30 +230,44 @@ class Inkling(nn.Module):
                 remain = remain * (1 - p)
             states.append(h)
         if HALTING and not hard_halt:
-            return out, expected
-        if not HALTING:
+            return out, expected, states
+        if not HALTING and not use_exit:
             expected = expected + loops
-        return h, expected
+        return h, expected, states
 
-    def forward(self, x, loops=None, hard_halt=False):
+    def forward(self, x, loops=None, hard_halt=False, exit_tau=0.0, return_states=False):
         loops = loops or self.train_loops
         h = self.emb(x).astype(DTYPE)
         for blk in self.prelude:
             h, _ = blk(h)
-        h, expected = self.recur(h, loops, hard_halt)
-        for blk in self.coda:
-            h, _ = blk(h)
-        return self.head(self.norm(h)).astype(mx.float32), expected
+        h, expected, states = self.recur(h, loops, hard_halt, exit_tau)
+        logits = self.readout(h)
+        return (logits, expected, states) if return_states else (logits, expected)
+
+    def loop_readouts(self, x, loops):
+        """Logits after each loop 1..loops (row r equals model(x, loops=r+1) for this architecture)."""
+        _, _, states = self.forward(x, loops, return_states=True)
+        return [self.readout(s) for s in states]
 
     def __call__(self, x, loops=None):
-        logits, expected = self.forward(x, loops, hard_halt=HALTING)
+        logits, expected = self.forward(x, loops, hard_halt=HALTING, exit_tau=EXIT_TAU)
         self.mean_loops_per_token = float(expected.mean().item())
         return logits
 
-    def loss(self, batch, loops):
-        logits, expected = self.forward(batch[:, :-1], loops)
+    def loss(self, batch, loops, consist_loop=-1):
+        """consist_loop: earlier loop (0-based, < loops-1) distilled from the final loop this step; -1 = none.
+        It is sampled outside the compiled step (one compiled graph per value), costing ~1 extra coda pass."""
+        if LOOP_CONSIST > 0 and not HALTING and 0 <= consist_loop < loops - 1:
+            logits, expected, states = self.forward(batch[:, :-1], loops, return_states=True)
+            r = consist_loop
+            teacher = mx.stop_gradient(mx.softmax(logits, axis=-1))
+            early = nn.log_softmax(self.readout(states[r]), axis=-1)
+            consist = -mx.sum(teacher * early, axis=-1).mean()
+        else:
+            logits, expected = self.forward(batch[:, :-1], loops)
+            consist = 0.0
         ce = nn.losses.cross_entropy(logits, batch[:, 1:]).mean()
-        return ce + (PONDER_COST * expected.mean() if HALTING else 0.0), ce
+        return ce + (PONDER_COST * expected.mean() if HALTING else 0.0) + LOOP_CONSIST * consist, ce
 
 
 # ---------------------------------------------------------------------------
@@ -242,19 +292,19 @@ def train(model, budget, lr_peak, seed=SEED, log_every=50, on_tick=None, stop_af
     (used to snapshot control models at a matched point of the same schedule)."""
     rng = np.random.default_rng(seed)
     opt = optim.AdamW(learning_rate=lr_peak, weight_decay=WEIGHT_DECAY, betas=[0.9, 0.95])
-    grad_fn = nn.value_and_grad(model, lambda b, k: model.loss(b, k))
+    grad_fn = nn.value_and_grad(model, lambda b, k, c: model.loss(b, k, c))
     state = [model.state, opt.state]
     steps_fns = {}
 
-    def step_fn(k):
-        if k not in steps_fns:
+    def step_fn(k, c=-1):
+        if (k, c) not in steps_fns:
             def step(batch):
-                (loss, ce), grads = grad_fn(batch, k)
+                (loss, ce), grads = grad_fn(batch, k, c)
                 grads, _ = optim.clip_grad_norm(grads, 1.0)
                 opt.update(model, grads)
                 return loss, ce
-            steps_fns[k] = mx.compile(step, inputs=state, outputs=state)
-        return steps_fns[k]
+            steps_fns[(k, c)] = mx.compile(step, inputs=state, outputs=state)
+        return steps_fns[(k, c)]
 
     model.train()
     data = Batches(BATCH_SIZE, seed=seed)
@@ -266,7 +316,8 @@ def train(model, budget, lr_peak, seed=SEED, log_every=50, on_tick=None, stop_af
         lr = lr_peak * min(1.0, (step + 1) / WARMUP_STEPS) * (FINAL_LR_FRAC + (1 - FINAL_LR_FRAC) * 0.5 * (1 + math.cos(math.pi * progress)))
         opt.learning_rate = lr
         k = int(rng.integers(1, 2 * LOOPS)) if RANDOM_LOOPS else LOOPS
-        loss, ce = step_fn(k)(mx.array(next(data)))
+        c = int(rng.integers(0, k - 1)) if (LOOP_CONSIST > 0 and k > 1) else -1
+        loss, ce = step_fn(k, c)(mx.array(next(data)))
         mx.eval(loss, ce, state)
         dt = time.perf_counter() - t0
         if step >= 2:                      # exclude compilation warm-up from the budget

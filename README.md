@@ -111,6 +111,8 @@ dense kernels, so mean loops is an analytical compute measure for now).
 | `HALTING` | per-token ACT-style halting with a ponder cost (Mixture-of-Recursions-style) | no, changes the computation |
 | `HISTORY`, `LOOP_EMBED` | inject a mean or gated summary of earlier loop states; loop-index conditioning | yes |
 | `KV_SHARE` | later loops reuse loop 1's keys and values (KV cache 15 → 6 KB/token) | no, changes the computation |
+| `EXIT_TAU`, `EXIT_METRIC` | training-free early exit at eval: a token stops looping once one more loop changes its prediction by less than tau (KL or state change) | yes at tau=0 (off) |
+| `LOOP_CONSIST` | self-distillation: a random earlier loop learns to predict the final loop's output, so early exits lose less | yes at 0 (off); adds no parameters |
 | `RANDOM_LOOPS`, `BPTT_LOOPS` | Huginn-style training for test-time scaling; truncated backprop through loops | n/a, training only |
 
 These are first-pass implementations written from short descriptions of the methods, not reproductions
