@@ -57,8 +57,9 @@ EXIT_TAU = 0.0                     # eval only: >0 freezes a token once its loop
 EXIT_METRIC = "kl"                 # "kl": KL(new || previous readout through coda+head); "state": relative L2 change
 LOOP_CONSIST = 0.0                 # train: weight of soft CE from final-loop readout to one random earlier loop
 CHUNK = 1                          # >1: core runs on K-byte chunks (changes the architecture; new base needed)
-ANSWER_W = 10.0                    # loss weight on reasoning answer digits ("?v=D"); answers are ~2.4% of the
-                                   # loss unweighted, ~20% at 10. The reported ce stays unweighted.
+ANSWER_W = 3.0                     # loss weight on reasoning answer digits ("?v=D"; unweighted they are ~2.4% of loss)
+FIRST_ANSWER_W = 30.0              # weight on each line's FIRST answer: a chain end, the only deep, question-dependent
+                                   # query (later answers can copy earlier ones). The reported ce stays unweighted.
 
 INIT_FROM_BASE = True              # continue from the shared base checkpoint (see pretrain_base.py)
 BATCH_SIZE = 32
@@ -134,7 +135,7 @@ class DepthAttention(nn.Module):
         return h + self.o((w[..., None] * self.v(S)).sum(2))
 
 
-def answer_mask(batch):
+def answer_mask(batch, with_first=False):
     """(B, T) bool over targets: the digit after "?<letter>=" in a reasoning row (rows [0, mix) of Batches),
     only once the row has seen a newline, so the line's statements are inside the window (answers in a line
     cut off at the window start are unpredictable noise)."""
@@ -147,7 +148,15 @@ def answer_mask(batch):
     seen_nl = mx.cummax((x == ord("\n")).astype(mx.int32), axis=1) > 0
     mix = max(1, round(REASONING_MIX * B / 32))
     rows = mx.arange(B)[:, None] < mix
-    return eq & letter & qm & digit & seen_nl & rows
+    ans = eq & letter & qm & digit & seen_nl & rows
+    if not with_first:
+        return ans
+    nl = (x == ord("\n")).astype(mx.int32)
+    line = mx.cumsum(nl, axis=1)                                   # line index within the row
+    c = mx.cumsum(ans.astype(mx.int32), axis=1)                    # answers so far in the row
+    start = mx.cummax(mx.where(nl > 0, c, 0), axis=1)              # answer count at the latest newline
+    first = ans & ((c - start) == 1) & (line > 0)
+    return ans, first
 
 
 def loop_features(r, d):
@@ -320,8 +329,9 @@ class Inkling(nn.Module):
             consist = 0.0
         tok = nn.losses.cross_entropy(logits, batch[:, 1:])
         ce = tok.mean()
-        if ANSWER_W != 1.0:
-            w = 1.0 + (ANSWER_W - 1.0) * answer_mask(batch).astype(tok.dtype)
+        if ANSWER_W != 1.0 or FIRST_ANSWER_W != 1.0:
+            ans, first = answer_mask(batch, with_first=True)
+            w = mx.where(first, FIRST_ANSWER_W, mx.where(ans, ANSWER_W, 1.0)).astype(tok.dtype)
             main = (w * tok).sum() / w.sum()
         else:
             main = ce

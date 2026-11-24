@@ -38,7 +38,7 @@ import prepare as P  # noqa: E402
 import pretrain_base as PB  # noqa: E402
 import train as T  # noqa: E402
 
-HOPS = (0, 1, 2, 3, 4, 6, 8, 10, 12)
+HOPS = (0, 1, 2, 3, 4, 6, 8, 10)
 TAUS = (1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1)
 
 
@@ -151,7 +151,7 @@ def main():
     model.eval()
     L = T.LOOPS
     rng = np.random.default_rng(616161)
-    sets = {h: [P.make_problem(rng, h) for _ in range(a.per_hop)] for h in HOPS}
+    sets = {h: P.twin_problems(rng, h, a.per_hop) for h in HOPS}
     res = {"name": a.name, "train_loops": L, "reasoning": reasoning_landing(model, sets, L),
            "reasoning_2x": reasoning_landing(model, sets, 2 * L), "text": text_landing(model, L)}
     for h, v in res["reasoning"].items():

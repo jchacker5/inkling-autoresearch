@@ -32,7 +32,8 @@ TRAIN_HOPS = (0, 6)               # inclusive hop range seen in training
 EVAL_HOPS_ID = (2, 4, 6)          # in-distribution evaluation hops
 EVAL_HOPS_OOD = (8, 10)           # out-of-distribution (deeper) hops
 EVAL_PER_HOP = 400
-TASK_VARS = 20                    # variables per problem at every hop: OOD means deeper, not also more crowded
+PAIR_BOUND = 0.25                 # pair accuracy reachable by structure + a coin flip, without reading the query
+TASK_VARS = 24                    # variables per problem at every hop (two chains of 11 fit at hop 10)
 VAL_WINDOWS = 384                 # 384 * 512 = ~197k scored bytes
 
 SMOKE = os.environ.get("INKLING_SMOKE") == "1"   # tiny budget for harness tests; never log as a result
@@ -57,27 +58,32 @@ DOC_SEP = 0                       # byte 0 separates documents
 # One chain of exactly `hops` pointer steps (TASK_VARS variables in all) is mixed with distractor trees.
 # Evaluation asks only the chain's end: "<statements>;?b=" -> "4". Each hop is one more serial lookup.
 #
-# Task v2 (2026-11-24). v1 put the chain's root in the first statement about half the time, so answering
-# with the prompt's first digit scored .48-.57 at every hop, and the 6-hour base had learned that shortcut
-# instead of pointer chasing. v2 removes position and frequency shortcuts:
-#   - every problem has TASK_VARS variables, so hop depth is not confounded with the number of distractors;
-#   - root digits are distinct (at most 10 roots), so "copy some digit" scores 1/#roots;
-#   - statements are a uniformly random topological order (parents still precede children), so the chain's
-#     root is at a random root position;
-#   - distractors never hang off the chain, so the chain's value is not the most common value by design.
-# `reason_floor` in evaluate() reports the best position heuristic (first/last digit) on the eval set itself.
+# Task v3 (2026-11-24). v1 put the chain's root in the first statement about half the time (copying the first
+# digit scored .48-.57 at every hop, and the 6-hour base learned exactly that). v2 fixed positions but the queried
+# chain was the only long single-child path, so structure alone found it (.97 at hops >= 4) and the most common
+# value was the answer at hops 8/10. v3 (evaluation debater, round 2):
+#   - TWO chains of exactly `hops` pointer steps (A and B) share one statement list, plus distractor trees;
+#     TASK_VARS variables at every hop; root digits distinct; uniformly random topological order.
+#   - Evaluation asks both chain ends as twin prompts and scores a PAIR as correct only if both twins are.
+#     A rule that ignores the question gives both twins the same answer, and the answers differ, so it scores 0;
+#     structure plus a coin flip scores .25. Pair accuracy above .25 needs real lookups along the asked chain.
+#   - Training lines ask one chain end first (the only deep, question-dependent query before any answer is
+#     visible; answers given earlier in a line make later queries 1-hop), then every variable in random order.
+#     train.py weights that first answer most (FIRST_ANSWER_W).
 _LETTERS = "abcdefghijklmnopqrstuvwxyz"
 
 
 def _forest(rng, hops):
+    """Returns (statements, (end_A, end_B), values)."""
     names = list(rng.permutation(list(_LETTERS))[:TASK_VARS])
-    chain, distract = names[: hops + 1], names[hops + 1:]
+    A, B, distract = names[: hops + 1], names[hops + 1: 2 * hops + 2], names[2 * hops + 2:]
     cap = max(hops, 3)                                 # distractor depth limit
-    parent, depth = {chain[0]: None}, {chain[0]: 0}
-    for i in range(1, hops + 1):
-        parent[chain[i]], depth[chain[i]] = chain[i - 1], i
-    roots, built = [chain[0]], []
-    for v in distract:
+    parent, depth = {A[0]: None, B[0]: None}, {A[0]: 0, B[0]: 0}
+    for ch in (A, B):
+        for i in range(1, hops + 1):
+            parent[ch[i]], depth[ch[i]] = ch[i - 1], i
+    roots, built = [A[0], B[0]], []
+    for v in distract:                                 # distractors never hang off the chains
         ok = [u for u in built if depth[u] < cap]
         if ok and (len(roots) >= 10 or rng.random() < 0.5):
             p = ok[int(rng.integers(len(ok)))]
@@ -99,27 +105,39 @@ def _forest(rng, hops):
         val[v] = digit[v] if p is None else val[p]
         stmts.append(f"{v}={digit[v]}" if p is None else f"{v}={p}")
         avail += kids[v]
-    return ";".join(stmts), chain[-1], val
+    return ";".join(stmts), (A[-1], B[-1]), val
 
 
 def position_floor(probs):
-    """Best accuracy of answering with the prompt's first or last digit (no pointer following)."""
+    """Best single-prompt accuracy of answering with the prompt's first or last digit (no pointer following)."""
     first = np.mean([re.findall(r"\d", p)[0] == a for p, a in probs])
     last = np.mean([re.findall(r"\d", p)[-1] == a for p, a in probs])
     return float(max(first, last))
 
 
+def make_pair(rng, hops):
+    """Twin prompts over one statement list: [(prompt asking A's end, answer), (prompt asking B's end, answer)]."""
+    stmts, ends, val = _forest(rng, hops)
+    return [(f"{stmts};?{q}=", str(val[q])) for q in ends]
+
+
 def make_problem(rng, hops):
-    stmts, q, val = _forest(rng, hops)
-    return f"{stmts};?{q}=", str(val[q])
+    return make_pair(rng, hops)[0]
+
+
+def twin_problems(rng, hops, n):
+    """n prompts (n even) as n/2 adjacent twin pairs; _reasoning_acc scores them as pairs."""
+    return [t for _ in range(n // 2) for t in make_pair(rng, hops)]
 
 
 def _reasoning_stream(seed, nbytes):
     rng = np.random.default_rng(seed)
     parts, total = [], 0
     while total < nbytes:
-        stmts, _, val = _forest(rng, int(rng.integers(TRAIN_HOPS[0], TRAIN_HOPS[1] + 1)))
-        qs = "".join(f"?{v}={val[v]}" for v in rng.permutation(list(val)))
+        stmts, ends, val = _forest(rng, int(rng.integers(TRAIN_HOPS[0], TRAIN_HOPS[1] + 1)))
+        first = ends[int(rng.integers(2))]
+        rest = [v for v in rng.permutation(list(val)) if v != first]
+        qs = "".join(f"?{v}={val[v]}" for v in [first] + rest)
         s = f"{stmts};{qs}\n".encode()
         parts.append(s); total += len(s)
     return np.frombuffer(b"".join(parts)[:nbytes], dtype=np.uint8)
@@ -127,10 +145,7 @@ def _reasoning_stream(seed, nbytes):
 
 def reasoning_eval_set():
     rng = np.random.default_rng(424242)   # disjoint seed from training stream
-    sets = {}
-    for h in EVAL_HOPS_ID + EVAL_HOPS_OOD:
-        sets[h] = [make_problem(rng, h) for _ in range(EVAL_PER_HOP)]
-    return sets
+    return {h: twin_problems(rng, h, EVAL_PER_HOP) for h in EVAL_HOPS_ID + EVAL_HOPS_OOD}
 
 # ---------------------------------------------------------------------------
 # Data download / build
@@ -180,7 +195,7 @@ def prepare():
         arr.tofile(out)
         os.remove(pq_path)            # disk is precious; the .bin is all we need
         print(f"wrote {out}: {len(arr)/2**20:.1f} MiB")
-    out = os.path.join(CACHE_DIR, "reason_train_v2.bin")
+    out = os.path.join(CACHE_DIR, "reason_train_v3.bin")
     if not os.path.exists(out):
         _reasoning_stream(1234, REASON_TRAIN_BYTES).tofile(out)
         print(f"wrote {out}")
@@ -201,7 +216,7 @@ class Batches:
     """Infinite iterator of (B, SEQ_LEN+1) uint8 windows. Rows [0, mix) are reasoning, the rest text."""
 
     def __init__(self, batch_size, seed=0):
-        self.text, self.reason = _load("train"), _load("reason_train_v2")
+        self.text, self.reason = _load("train"), _load("reason_train_v3")
         self.B = batch_size
         self.mix = max(1, round(REASONING_MIX * batch_size / 32))
         self.rng = np.random.default_rng(seed)
@@ -255,11 +270,13 @@ def encode_prompt(prompt, align=1):
     return _FILLER[-pad:] + e
 
 
-def _reasoning_acc(model, sets, loops, mx):
-    acc = {}
+def _reasoning_acc(model, sets, loops, mx, return_single=False):
+    """Pair accuracy per hop (sets hold adjacent twin prompts, see twin_problems); chance-free floor 0, .25 = the
+    structure-plus-coin-flip bound. return_single also returns per-prompt accuracy."""
+    acc, single = {}, {}
     align = getattr(model, "align", 1)
     for h, probs in sets.items():
-        correct = 0
+        hits = []
         for i in range(0, len(probs), 64):
             chunk = probs[i:i + 64]
             enc = [encode_prompt(p, align) for p, _ in chunk]
@@ -270,8 +287,12 @@ def _reasoning_acc(model, sets, loops, mx):
             logits = _call(model, mx.array(x), loops)
             last = mx.array([len(e) - 1 for e in enc])
             pred = np.array(mx.argmax(logits[mx.arange(len(enc)), last], axis=-1))
-            correct += sum(int(pred[r]) == ord(a) for r, (_, a) in enumerate(chunk))
-        acc[h] = correct / len(probs)
+            hits += [int(pred[r]) == ord(a) for r, (_, a) in enumerate(chunk)]
+        hits = np.array(hits)
+        single[h] = float(hits.mean())
+        acc[h] = float((hits[0::2] & hits[1::2]).mean())   # twins are adjacent: a pair counts if both are right
+    if return_single:
+        return acc, single
     return acc
 
 
@@ -304,14 +325,13 @@ def evaluate(model, train_info):
 
     t0 = time.perf_counter()
     res = {"val_bpb": _val_bpb(model, None, mx, nn)}
-    acc = _reasoning_acc(model, sets, None, mx)
+    acc, single = _reasoning_acc(model, sets, None, mx, return_single=True)
+    res["reason_single_by_hop"] = single
     res["reason_id"] = float(np.mean([acc[h] for h in EVAL_HOPS_ID]))
     res["reason_ood"] = float(np.mean([acc[h] for h in EVAL_HOPS_OOD]))
     res["reason_by_hop"] = acc
-    floor = {h: position_floor(p) for h, p in sets.items()}
-    res["reason_floor_by_hop"] = floor
-    res["reason_floor_id"] = float(np.mean([floor[h] for h in EVAL_HOPS_ID]))
-    res["reason_floor_ood"] = float(np.mean([floor[h] for h in EVAL_HOPS_OOD]))
+    res["reason_single_floor_by_hop"] = {h: position_floor(p) for h, p in sets.items()}   # per-prompt position rule
+    res["reason_floor_id"] = res["reason_floor_ood"] = PAIR_BOUND   # pair accuracy must beat this to show lookups
     res["mean_loops_per_token"] = getattr(model, "mean_loops_per_token", base_loops)
 
     # Test-time scaling: same weights, more (and fewer) loops. Only for models that accept loops=.

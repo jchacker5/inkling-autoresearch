@@ -27,7 +27,7 @@ import pretrain_base as PB  # noqa: E402
 import train as T  # noqa: E402
 
 SWEEP_LOOPS = (1, 2, 3, 4, 6, 8, 12)
-SWEEP_HOPS = (1, 2, 3, 4, 6, 8, 10, 12)
+SWEEP_HOPS = (1, 2, 3, 4, 6, 8, 10)
 
 
 def main():
@@ -50,7 +50,7 @@ def main():
     res.update(name=a.name, overrides=overrides, checkpoint_meta=meta, sweep={})
     if not a.no_sweep:
         rng = np.random.default_rng(515151)
-        sets = {h: [P.make_problem(rng, h) for _ in range(a.per_hop)] for h in SWEEP_HOPS}
+        sets = {h: P.twin_problems(rng, h, a.per_hop) for h in SWEEP_HOPS}
         for k in SWEEP_LOOPS:
             acc = P._reasoning_acc(model, sets, k, mx)
             res["sweep"][k] = {"val_bpb": P._val_bpb(model, k, mx, nn), "acc_by_hop": acc}

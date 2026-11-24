@@ -39,7 +39,7 @@ HOPS = (0, 1, 2, 4, 6, 8)
 def quick_eval(model):
     import mlx.nn as nn
     rng = np.random.default_rng(7)
-    sets = {h: [P.make_problem(rng, h) for _ in range(100)] for h in HOPS}
+    sets = {h: P.twin_problems(rng, h, 100) for h in HOPS}
     acc = P._reasoning_acc(model, sets, None, mx)
     keep = P.VAL_WINDOWS
     P.VAL_WINDOWS = 64

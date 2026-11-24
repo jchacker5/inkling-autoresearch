@@ -58,7 +58,7 @@ def test_eval_set_is_fixed_and_disjoint_in_seed():
     assert set(a) == set(P.EVAL_HOPS_ID + P.EVAL_HOPS_OOD)
 
 
-def test_v2_has_no_position_shortcut_and_fixed_size():
+def test_no_position_shortcut_and_fixed_size():
     """Regression for the v1 shortcut: the first digit scored ~.5 at every hop. v2 must stay near 1/#roots."""
     sets = P.reasoning_eval_set()
     for h, probs in sets.items():
@@ -68,7 +68,7 @@ def test_v2_has_no_position_shortcut_and_fixed_size():
 
 def test_root_digits_are_distinct():
     rng = np.random.default_rng(3)
-    for hops in range(0, 13):
+    for hops in range(0, 11):
         prompt, _ = P.make_problem(rng, hops)
         digits = re.findall(r"\d", prompt)
         assert len(digits) == len(set(digits))
@@ -84,3 +84,23 @@ def test_eval_prompt_follows_newline_and_aligns_to_chunks(k):
             assert (len(e) - 1) % k == 0
             q = e[-3:-1]                       # "?v" must lie strictly before the answer position's chunk
             assert (len(e) - 3) // k < (len(e) - 1) // k
+
+
+@pytest.mark.parametrize("hops", [0, 2, 6, 10])
+def test_twins_share_statements_have_equal_depth_and_differ(hops):
+    rng = np.random.default_rng(10 + hops)
+    for _ in range(100):
+        (pa, aa), (pb, ab) = P.make_pair(rng, hops)
+        sa, qa = re.fullmatch(r"(.*);\?([a-z])=", pa).groups()
+        sb, qb = re.fullmatch(r"(.*);\?([a-z])=", pb).groups()
+        assert sa == sb and qa != qb and aa != ab
+        look = resolve(sa)
+        assert look(qa)[1] == look(qb)[1] == hops
+
+
+def test_query_blind_rule_scores_zero_pairs():
+    sets = P.reasoning_eval_set()
+    for probs in sets.values():
+        pairs = list(zip(probs[0::2], probs[1::2]))
+        first_digit = [re.findall(r"\d", a[0])[0] for a, _ in pairs]
+        assert sum(fd == a[1] and fd == b[1] for fd, (a, b) in zip(first_digit, pairs)) == 0

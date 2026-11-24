@@ -164,10 +164,22 @@ def test_answer_mask_marks_only_answer_digits_after_a_newline():
     assert not m[8:].any()                                   # text rows (>= mix) never weighted
 
 
+def test_first_answer_mask_marks_each_lines_first_answer():
+    import train
+    importlib.reload(train)
+    row = b"x;?q=5\na=3;b=a;?b=3?a=3\nc=7;?c=7"
+    x = np.frombuffer(row, dtype=np.uint8).astype(np.int32)
+    ans, first = train.answer_mask(mx.array(np.stack([x] * 32)), with_first=True)
+    tgt = row[1:]
+    f = [i for i in range(len(tgt)) if np.array(first)[0, i]]
+    assert len(f) == 2 and all(chr(tgt[i]) in "37" for i in f)
+    assert f[0] == row.index(b"?b=3") + 2                     # first answer of line 2, not "?a=3"
+
+
 def test_answer_weight_leaves_reported_ce_unweighted():
     train, m = build(ANSWER_W=10.0)
     x = batch()
     loss, ce = m.loss(x, 4)
-    train.ANSWER_W = 1.0
+    train.ANSWER_W = train.FIRST_ANSWER_W = 1.0
     loss1, ce1 = m.loss(x, 4)
     assert abs(ce.item() - ce1.item()) < 1e-6 and abs(loss1.item() - ce1.item()) < 1e-6
