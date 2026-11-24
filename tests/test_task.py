@@ -72,3 +72,15 @@ def test_root_digits_are_distinct():
         prompt, _ = P.make_problem(rng, hops)
         digits = re.findall(r"\d", prompt)
         assert len(digits) == len(set(digits))
+
+
+@pytest.mark.parametrize("k", [1, 2, 4])
+def test_eval_prompt_follows_newline_and_aligns_to_chunks(k):
+    """Every eval prompt follows a newline (as in training); for CHUNK=k the query sits in a completed chunk."""
+    for probs in P.reasoning_eval_set().values():
+        for p, _ in probs[:20]:
+            e = P.encode_prompt(p, k)
+            assert e.endswith(p.encode()) and e[-len(p) - 1:-len(p)] == b"\n"
+            assert (len(e) - 1) % k == 0
+            q = e[-3:-1]                       # "?v" must lie strictly before the answer position's chunk
+            assert (len(e) - 3) // k < (len(e) - 1) // k

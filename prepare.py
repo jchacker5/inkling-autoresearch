@@ -237,13 +237,32 @@ def _val_bpb(model, loops, mx, nn):
     return total / n / math.log(2)
 
 
+_FILLER = None
+
+
+def encode_prompt(prompt, align=1):
+    """Bytes the model sees for an eval prompt. Training lines always follow a newline, so the prompt does too.
+    align=K (CHUNK models): extra left context, the tail of a real training line, so that the prompt's last
+    byte starts a K-byte chunk. Otherwise the query "?v=" shares a chunk with the answer position and the
+    looped core (which sees only completed chunks) never sees which variable was asked for."""
+    global _FILLER
+    if _FILLER is None:
+        rng = np.random.default_rng(777)
+        stmts, _, val = _forest(rng, 3)
+        _FILLER = (stmts + ";" + "".join(f"?{v}={val[v]}" for v in sorted(val)) + "\n").encode()
+    e = prompt.encode()
+    pad = 1 + (-(len(e) + 1 - 1)) % align                # filler length so that (pad + len(e) - 1) % align == 0
+    return _FILLER[-pad:] + e
+
+
 def _reasoning_acc(model, sets, loops, mx):
     acc = {}
+    align = getattr(model, "align", 1)
     for h, probs in sets.items():
         correct = 0
         for i in range(0, len(probs), 64):
             chunk = probs[i:i + 64]
-            enc = [p.encode() for p, _ in chunk]
+            enc = [encode_prompt(p, align) for p, _ in chunk]
             T = max(len(e) for e in enc)
             x = np.zeros((len(enc), T), dtype=np.int32)
             for r, e in enumerate(enc):

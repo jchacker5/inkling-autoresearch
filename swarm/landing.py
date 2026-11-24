@@ -42,8 +42,8 @@ HOPS = (0, 1, 2, 3, 4, 6, 8, 10, 12)
 TAUS = (1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1)
 
 
-def encode(chunk):
-    enc = [p.encode() for p, _ in chunk]
+def encode(chunk, align=1):
+    enc = [P.encode_prompt(p, align) for p, _ in chunk]
     x = np.zeros((len(enc), max(len(e) for e in enc)), dtype=np.int32)
     for r, e in enumerate(enc):
         x[r, :len(e)] = np.frombuffer(e, dtype=np.uint8)
@@ -67,7 +67,7 @@ def reasoning_landing(model, sets, L):
         preds, gold = [], []
         for i in range(0, len(probs), 64):
             chunk = probs[i:i + 64]
-            x, last = encode(chunk)
+            x, last = encode(chunk, getattr(model, 'align', 1))
             ro = model.loop_readouts(x, L)
             preds.append(np.stack([np.array(mx.argmax(lo[mx.arange(len(chunk)), last], axis=-1)) for lo in ro], 1))
             gold += [ord(a) for _, a in chunk]
@@ -122,7 +122,7 @@ def exit_sweep(model, sets, max_loops):
         acc = P._reasoning_acc(model, sets, max_loops, mx)
         ans = []
         for h, probs in sets.items():               # mean loops spent at the answer position
-            x, last = encode(probs[:64])
+            x, last = encode(probs[:64], getattr(model, 'align', 1))
             ans.append(mean_loops(model, x, max_loops, tau, last))
         bpb = P._val_bpb(model, max_loops, mx, nn)
         txt = mean_loops(model, text, max_loops, tau)

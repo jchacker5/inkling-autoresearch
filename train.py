@@ -142,6 +142,7 @@ class Inkling(nn.Module):
         super().__init__()
         d = D_MODEL
         self.train_loops = LOOPS
+        self.align = CHUNK                    # eval prompts end on a chunk boundary (prepare.encode_prompt)
         self.emb = nn.Embedding(VOCAB_SIZE, d)
         self.prelude = [Block(d, N_HEADS) for _ in range(PRELUDE)]
         self.core = [Block(d, N_HEADS) for _ in range(CORE)]
