@@ -45,6 +45,7 @@ def quick_eval(model):
     P.VAL_WINDOWS = 64
     bpb = P._val_bpb(model, None, mx, nn)
     P.VAL_WINDOWS = keep
+    mx.clear_cache()                       # eval shapes differ from training; do not keep their buffers
     model.train()
     return bpb, acc
 
