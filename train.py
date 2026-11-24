@@ -22,6 +22,10 @@ from mlx.utils import tree_flatten
 
 from prepare import BASE_CKPT, SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, Batches, evaluate
 
+# MLX keeps freed GPU buffers for reuse. With the variable-length eval batches that cache grew to 15 GB during
+# the 6-hour base run, pushed macOS into swap and filled the disk until the kernel killed training. Cap it.
+mx.set_cache_limit(2 * 2**30)
+
 # ---------------------------------------------------------------------------
 # Hyperparameters and experiment switches
 # ---------------------------------------------------------------------------
