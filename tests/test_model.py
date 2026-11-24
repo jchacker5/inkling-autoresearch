@@ -21,10 +21,16 @@ CASES = {
     "loop_embed": {"LOOP_EMBED": True},
     "kv_share": {"KV_SHARE": True},
     "random_loops_bptt": {"RANDOM_LOOPS": True, "BPTT_LOOPS": 2},
+    "utility_exit_kl": {"EXIT_TAU": 0.01},
+    "utility_exit_state": {"EXIT_TAU": 0.05, "EXIT_METRIC": "state"},
+    "loop_consist": {"LOOP_CONSIST": 0.5},
+    "chunk2": {"CHUNK": 2},
+    "chunk4": {"CHUNK": 4},
+    "chunk4_exit": {"CHUNK": 4, "EXIT_TAU": 0.05, "EXIT_METRIC": "state"},
     "combined": {"DEPTH_ATTN": 2, "HALTING": True, "LOOP_EMBED": True, "KV_SHARE": True},
 }
 # Switches that add parameters but must not change the function at init, so warm-starting is safe.
-NO_OP_AT_INIT = ["depth_attn", "history_gated", "history_mean", "loop_embed"]
+NO_OP_AT_INIT = ["depth_attn", "history_gated", "history_mean", "loop_embed", "loop_consist"]
 
 
 def build(**switches):
@@ -90,3 +96,56 @@ def test_default_config_fits_param_budget():
     m = train.Inkling()
     n = sum(v.size for _, v in tree_flatten(m.parameters()))
     assert n <= P.MAX_PARAMS
+
+
+def test_loop_readouts_equal_truncated_runs():
+    """The logit lens used by swarm/landing.py is exact: readout after loop r == running r+1 loops."""
+    _, m = build()
+    x = batch()[:, :-1]
+    outs = m.loop_readouts(x, 4)
+    assert len(outs) == 4
+    for r, lo in enumerate(outs):
+        assert mx.abs(lo - m(x, loops=r + 1)).max().item() < 1e-4
+
+
+@pytest.mark.parametrize("metric", ["kl", "state"])
+def test_utility_exit_limits(metric):
+    """A vanishing tau never exits (identical to no exit); a huge tau exits every token after loop 2."""
+    train, m = build(EXIT_METRIC=metric)
+    x = batch()[:, :-1]
+    ref = m(x)
+    train.EXIT_TAU = 1e-30
+    assert mx.abs(m(x) - ref).max().item() < 1e-5 and abs(m.mean_loops_per_token - 4) < 1e-6
+    train.EXIT_TAU = 1e30
+    m(x)
+    assert abs(m.mean_loops_per_token - 2) < 1e-6
+    assert mx.abs(m(x) - m.loop_readouts(x, 2)[1]).max().item() < 1e-4
+
+
+def test_loop_consistency_loss():
+    """The consistency term is off unless a loop is sampled, and then adds a finite, non-negative penalty."""
+    train, m = build(LOOP_CONSIST=0.5)
+    x = batch()
+    off, ce_off = m.loss(x, 4, -1)
+    on, ce_on = m.loss(x, 4, 1)
+    assert abs(off.item() - ce_off.item()) < 1e-6 and abs(ce_on.item() - ce_off.item()) < 1e-6
+    assert on.item() > off.item() and math.isfinite(on.item())
+
+
+@pytest.mark.parametrize("k", [2, 4])
+def test_chunk_handles_ragged_length_and_shrinks_cache(k):
+    """Lengths not divisible by K work (right padding never leaks backwards) and the core KV per byte drops."""
+    plain = build()[1].kv_bytes_per_token()
+    _, m = build(CHUNK=k)
+    assert m.kv_bytes_per_token() < plain
+    x = batch(T=47)[:, :-1]
+    full = m(x)
+    assert full.shape == (2, 47, 256)
+    assert mx.abs(m(x[:, :30]) - full[:, :30]).max().item() < 1e-4
+
+
+def test_chunk_readouts_equal_truncated_runs():
+    _, m = build(CHUNK=4)
+    x = batch()[:, :-1]
+    for r, lo in enumerate(m.loop_readouts(x, 3)):
+        assert mx.abs(lo - m(x, loops=r + 1)).max().item() < 1e-4
