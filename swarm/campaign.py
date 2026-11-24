@@ -139,6 +139,7 @@ def main():
     STATE.mkdir(parents=True, exist_ok=True)
     os.chdir(ROOT)
     log(f"campaign start: {vars(a)}")
+    run(UV, "run", "prepare.py")          # idempotent; builds any missing data file (e.g. reason_train_v2.bin)
 
     # 1. base (task v1, 6 h; kept for its text ability) and base-v2 = base continued on task-v2 data.
     #    v1 had a first-digit shortcut that the base learned (README); every warm start uses base-v2.
