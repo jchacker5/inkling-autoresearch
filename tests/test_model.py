@@ -24,6 +24,9 @@ CASES = {
     "utility_exit_kl": {"EXIT_TAU": 0.01},
     "utility_exit_state": {"EXIT_TAU": 0.05, "EXIT_METRIC": "state"},
     "loop_consist": {"LOOP_CONSIST": 0.5},
+    "chunk2": {"CHUNK": 2},
+    "chunk4": {"CHUNK": 4},
+    "chunk4_exit": {"CHUNK": 4, "EXIT_TAU": 0.05, "EXIT_METRIC": "state"},
     "combined": {"DEPTH_ATTN": 2, "HALTING": True, "LOOP_EMBED": True, "KV_SHARE": True},
 }
 # Switches that add parameters but must not change the function at init, so warm-starting is safe.
@@ -127,3 +130,22 @@ def test_loop_consistency_loss():
     on, ce_on = m.loss(x, 4, 1)
     assert abs(off.item() - ce_off.item()) < 1e-6 and abs(ce_on.item() - ce_off.item()) < 1e-6
     assert on.item() > off.item() and math.isfinite(on.item())
+
+
+@pytest.mark.parametrize("k", [2, 4])
+def test_chunk_handles_ragged_length_and_shrinks_cache(k):
+    """Lengths not divisible by K work (right padding never leaks backwards) and the core KV per byte drops."""
+    plain = build()[1].kv_bytes_per_token()
+    _, m = build(CHUNK=k)
+    assert m.kv_bytes_per_token() < plain
+    x = batch(T=47)[:, :-1]
+    full = m(x)
+    assert full.shape == (2, 47, 256)
+    assert mx.abs(m(x[:, :30]) - full[:, :30]).max().item() < 1e-4
+
+
+def test_chunk_readouts_equal_truncated_runs():
+    _, m = build(CHUNK=4)
+    x = batch()[:, :-1]
+    for r, lo in enumerate(m.loop_readouts(x, 3)):
+        assert mx.abs(lo - m(x, loops=r + 1)).max().item() < 1e-4

@@ -111,7 +111,14 @@ Each lane is one hypothesis family. In a swarm each agent owns one lane. Alone, 
    accuracy; a win is equal `reason_id`/`reason_ood` and `val_bpb` at fewer mean loops, or better accuracy at
    2x loops (no destructive overthinking). Frozen tokens are still computed in this implementation, so
    claim loop savings, not wall-clock savings, until a sparse kernel exists.
-7. **parallel-recurrence** (LoopFold-style): phase 2, inference only. Predict later loop states, run them
+7. **chunked-core** (after CALM, arXiv 2510.27688). `CHUNK=K` runs the core on K-byte chunks: the byte
+   prelude is pooled K-to-1, the core loops over T/K positions, and its output is shifted one chunk and
+   unpooled into a byte-level coda, so bits per byte stays exact and the model stays causal. Core FLOPs and KV
+   cache per byte fall by K, so the same budget buys more loops or width. It is a new architecture: the campaign
+   trains `chunk2`/`chunk4` bases on the 6-hour schedule stopped at 2 h and compares them with `base-2h`.
+   Lane work, once a chunk base exists: point `BASE_CKPT` at it, then test more loops, a wider core at equal
+   FLOPs, and a 2-block coda.
+8. **parallel-recurrence** (LoopFold-style): phase 2, inference only. Predict later loop states, run them
    in parallel and correct them. Only start once lanes 1-4 have a confirmed model. Measure real wall clock
    with MLX, not FLOPs.
 

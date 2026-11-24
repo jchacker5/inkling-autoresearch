@@ -11,7 +11,10 @@ Experiment switches below map to the research directions in program.md:
   EXIT_TAU        training-free early exit: a token stops looping once one more loop
                   changes its prediction by < tau (utility-based, TRACE-style overthinking cut)
   LOOP_CONSIST    self-distillation: earlier loops learn to predict the final loop's output,
-                  so early exits lose less (cf. Shallow-Deep Networks, CALM)
+                  so early exits lose less (cf. Shallow-Deep Networks, CALM early exit)
+  CHUNK           run the looped core over K-byte chunks (hourglass; cf. CALM, arXiv 2510.27688): byte
+                  prelude -> pool K bytes -> core on T/K positions -> shift + unpool -> byte coda.
+                  Core FLOPs and core KV cache / K. Needs its own base (not a warm start).
 Usage: uv run train.py > run.log 2>&1
 """
 import math
@@ -53,6 +56,7 @@ KV_SHARE = False                   # core loops >1 attend with loop-1 K/V (KV ca
 EXIT_TAU = 0.0                     # eval only: >0 freezes a token once its loop-to-loop change falls below tau
 EXIT_METRIC = "kl"                 # "kl": KL(new || previous readout through coda+head); "state": relative L2 change
 LOOP_CONSIST = 0.0                 # train: weight of soft CE from final-loop readout to one random earlier loop
+CHUNK = 1                          # >1: core runs on K-byte chunks (changes the architecture; new base needed)
 
 INIT_FROM_BASE = True              # continue from the shared base checkpoint (see pretrain_base.py)
 BATCH_SIZE = 32
@@ -144,6 +148,9 @@ class Inkling(nn.Module):
         self.coda = [Block(d, N_HEADS) for _ in range(CODA)]
         self.norm = nn.RMSNorm(d)
         self.head = nn.Linear(d, VOCAB_SIZE, bias=False)
+        if CHUNK > 1:
+            self.down = nn.Linear(CHUNK * d, d)        # K byte states -> one core position
+            self.up = nn.Linear(d, CHUNK * d)          # one core state -> a vector per byte offset
         if LOOP_EMBED:
             self.loop_proj = nn.Linear(d, d, bias=False)
             self.loop_proj.weight = mx.zeros_like(self.loop_proj.weight)
@@ -160,30 +167,49 @@ class Inkling(nn.Module):
 
     def kv_bytes_per_token(self):
         core_layers = CORE * (1 if KV_SHARE else self.train_loops)
-        return 2 * D_MODEL * 2 * (PRELUDE + core_layers + CODA)   # K and V, bf16
+        return 2 * D_MODEL * 2 * (PRELUDE + core_layers / CHUNK + CODA)   # K and V, bf16, per byte
 
-    def readout(self, h):
+    def chunk(self, b):
+        """(B, T, d) byte states -> (B, ceil(T/K), d) chunk states (right-padded; padding only feeds later chunks)."""
+        B, T, d = b.shape
+        pad = (-T) % CHUNK
+        if pad:
+            b = mx.concatenate([b, mx.zeros((B, pad, d), dtype=b.dtype)], axis=1)
+        return self.down(b.reshape(B, (T + pad) // CHUNK, CHUNK * d))
+
+    def unchunk(self, h, byte):
+        """Chunk j's core state is added to the bytes of chunk j+1 only (shift by one chunk keeps it causal)."""
+        B, T, d = byte.shape
+        h = mx.concatenate([mx.zeros((B, 1, d), dtype=h.dtype), h[:, :-1]], axis=1)
+        u = self.up(h).reshape(B, h.shape[1] * CHUNK, d)[:, :T]
+        return byte + u
+
+    def readout(self, h, byte=None):
         """Decode a loop state through the coda and head (an exact 'stop after this loop' logit lens)."""
+        if CHUNK > 1:
+            h = self.unchunk(h, byte)
         for blk in self.coda:
             h, _ = blk(h)
         return self.head(self.norm(h)).astype(mx.float32)
 
-    def _change(self, x, h, prev_lp):
+    def _change(self, x, h, prev_lp, byte=None):
         """Per-token change from one loop to the next. Returns (change (B,T,1), log-probs of x's readout)."""
         if EXIT_METRIC == "state":
             num = mx.sqrt(mx.sum(mx.square((x - h).astype(mx.float32)), axis=-1, keepdims=True))
             den = mx.sqrt(mx.sum(mx.square(h.astype(mx.float32)), axis=-1, keepdims=True)) + 1e-6
             return num / den, None
-        lp = nn.log_softmax(self.readout(x), axis=-1)
+        lp = nn.log_softmax(self.readout(x, byte), axis=-1)
         if prev_lp is None:
             return None, lp
         return mx.sum(mx.exp(lp) * (lp - prev_lp), axis=-1, keepdims=True), lp
 
-    def recur(self, e, loops, hard_halt=False, exit_tau=0.0):
+    def recur(self, e, loops, hard_halt=False, exit_tau=0.0, byte=None):
         """Run the recurrent core. Returns (state to decode, expected loops per token, per-loop states)."""
         h, states, kvs = e, [], [None] * CORE
         B, T, _ = e.shape
         use_exit = exit_tau > 0 and not HALTING
+        if use_exit and CHUNK > 1 and EXIT_METRIC != "state":
+            raise ValueError("with CHUNK > 1 use EXIT_METRIC='state' (KL is per byte, exits are per chunk)")
         prev_lp = None
         active = mx.ones((B, T, 1), dtype=mx.bool_)          # hard halting: tokens still computing
         remain = mx.ones((B, T, 1), dtype=mx.float32)        # soft halting: prob mass not yet halted
@@ -209,7 +235,7 @@ class Inkling(nn.Module):
                 expected = expected + active[..., 0].astype(mx.float32)
                 x = mx.where(active, x, h)                     # exited tokens keep their exit state
                 if r < loops - 1:
-                    d, prev_lp = self._change(x, h, prev_lp)
+                    d, prev_lp = self._change(x, h, prev_lp, byte)
                     if d is not None and r > 0:                # r=0 compares against the prelude output: skip
                         active = active & (d >= exit_tau)
                 h = x
@@ -244,14 +270,17 @@ class Inkling(nn.Module):
         h = self.emb(x).astype(DTYPE)
         for blk in self.prelude:
             h, _ = blk(h)
-        h, expected, states = self.recur(h, loops, hard_halt, exit_tau)
-        logits = self.readout(h)
-        return (logits, expected, states) if return_states else (logits, expected)
+        byte = h
+        if CHUNK > 1:
+            h = self.chunk(h)
+        h, expected, states = self.recur(h, loops, hard_halt, exit_tau, byte)
+        logits = self.readout(h, byte)
+        return (logits, expected, states, byte) if return_states else (logits, expected)
 
     def loop_readouts(self, x, loops):
         """Logits after each loop 1..loops (row r equals model(x, loops=r+1) for this architecture)."""
-        _, _, states = self.forward(x, loops, return_states=True)
-        return [self.readout(s) for s in states]
+        _, _, states, byte = self.forward(x, loops, return_states=True)
+        return [self.readout(s, byte) for s in states]
 
     def __call__(self, x, loops=None):
         logits, expected = self.forward(x, loops, hard_halt=HALTING, exit_tau=EXIT_TAU)
@@ -262,10 +291,10 @@ class Inkling(nn.Module):
         """consist_loop: earlier loop (0-based, < loops-1) distilled from the final loop this step; -1 = none.
         It is sampled outside the compiled step (one compiled graph per value), costing ~1 extra coda pass."""
         if LOOP_CONSIST > 0 and not HALTING and 0 <= consist_loop < loops - 1:
-            logits, expected, states = self.forward(batch[:, :-1], loops, return_states=True)
+            logits, expected, states, byte = self.forward(batch[:, :-1], loops, return_states=True)
             r = consist_loop
             teacher = mx.stop_gradient(mx.softmax(logits, axis=-1))
-            early = nn.log_softmax(self.readout(states[r]), axis=-1)
+            early = nn.log_softmax(self.readout(states[r], byte), axis=-1)
             consist = -mx.sum(teacher * early, axis=-1).mean()
         else:
             logits, expected = self.forward(batch[:, :-1], loops)
