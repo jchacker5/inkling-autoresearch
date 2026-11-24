@@ -4,12 +4,12 @@ to re-run after a crash, a reboot or a kill, and it picks up where it stopped.
     uv run swarm/campaign.py --tag nov23 --lanes recipe depth-attn halting kv-reuse
 
 1. finish the shared base (pretrain_base.py --resume until it has its full --hours)
-2. baseline: 3 seeds of "base + 5 minutes of unchanged training" -> noise -> keep/discard thresholds
-3. the agent swarm (swarm/launch.sh), one lane per agent
-4. confirmation: re-run every lane's best kept commit with seeds 1 and 2
-5. controls: conventional transformers trained on the same 6-hour schedule, stopped at 2 hours
-   (same unique params: 4 layers, LOOPS=1; same depth: 10 layers, LOOPS=1, ~2.4x params)
-6. full evaluation of the base (2 h snapshot and final, with a test-time loop sweep) and the controls
+2. baseline: 6 seeds (0..5) of "base + 5 minutes of unchanged training" -> noise report (results/noise.md);
+   swarm/run.py screens every run against these pooled seeds
+3. landing analysis of the base; controls and chunked-core models (6-hour schedule stopped at 2 hours); evals
+4. the agent swarm (swarm/launch.sh), one lane per agent
+5. confirmation: each lane's best candidate and the baseline, 6 fresh seeds each on the holdout eval set;
+   one-sided Welch per lane, Holm across lanes -> results/confirm.tsv (swarm/confirm.py)
 
 GPU work waits for AC power without Low Power Mode (every budget here is wall clock) and for 3 GB of
 free disk (macOS swaps to it; a full disk gets the training process killed).
@@ -28,6 +28,12 @@ ROOT = Path(__file__).resolve().parent.parent
 CACHE = Path.home() / ".cache" / "inkling-autoresearch"
 STATE = CACHE / "campaign"
 UV = os.environ.get("UV", "uv")
+BASELINE_SEEDS = tuple(range(6))
+
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "swarm"))
+from confirm import BASELINE_LANE, CONFIRM_SEEDS, best_candidate, confirm_table, write_tsv  # noqa: E402
+from prepare import HOLDOUT_EVAL_SEED  # noqa: E402
 
 
 def log(msg):
@@ -152,8 +158,8 @@ def main():
             sys.exit(1)
         mark("base-v2", json.dumps({k: meta("base-v2")[k] for k in ("steps", "train_seconds")}))
 
-    # 2. baseline seeds
-    for s in (0, 1, 2):
+    # 2. baseline seeds: the pooled screening reference for every verdict (program.md), then the noise report
+    for s in BASELINE_SEEDS:
         if not done(f"baseline-{s}"):
             wait_for_power()
             run(UV, "run", "swarm/run.py", "--lane", "baseline", "--seed", str(s), "--desc", f"baseline seed {s}",
@@ -213,27 +219,43 @@ def main():
                 env={"SESSIONS": str(a.sessions), "EXPERIMENTS": str(a.experiments)}, check=False)
         mark("swarm")
 
-    # 7. confirm each lane's best kept commit with seeds 1 and 2
+    # 7. confirmation (program.md "Promotion"): each lane's best screening candidate gets fresh seeds scored on the
+    #    HOLDOUT eval set, interleaved with the same number of fresh baseline seeds on the same set; then a one-sided
+    #    Welch test per lane, Holm across lanes at alpha .05 -> results/confirm.tsv.
+    holdout = {"INKLING_EVAL_SEED": str(HOLDOUT_EVAL_SEED)}
+    finalists = {}
     for lane in lanes:
-        wt = ROOT / "lanes" / lane
-        kept = [r for r in ledger() if r["lane"] == lane and r["verdict"] == "keep" and r["valid"] == "True"]
-        if not kept or not wt.exists():
-            continue
-        best_commit = kept[-1]["commit"]
-        for s in (1, 2):
-            step = f"confirm-{lane}-{s}"
+        best = best_candidate(ledger(), lane)
+        if best is not None and (ROOT / "lanes" / lane).exists():
+            finalists[lane] = best
+    if finalists:
+        log("confirmation finalists: " + ", ".join(f"{k}@{v['commit']}" for k, v in finalists.items()))
+    for s in CONFIRM_SEEDS if finalists else ():
+        step = f"confirm-baseline-{s}"
+        if not done(step):
+            wait_for_power()
+            run(UV, "run", "swarm/run.py", "--lane", BASELINE_LANE, "--seed", str(s),
+                "--desc", f"holdout baseline seed {s}", "--hypothesis", "confirmation reference", env=holdout)
+            mark(step)
+        for lane, best in finalists.items():
+            step = f"confirm-{lane}-{best['commit']}-{s}"
             if done(step):
                 continue
-            # the lane's branch head is its last kept commit; drop any unfinished experiment first
+            wt = ROOT / "lanes" / lane
+            # drop any unfinished experiment, then check out the candidate's commit
             run("git", "checkout", "-q", "--", "train.py", cwd=wt, check=False)
-            head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=wt, capture_output=True, text=True).stdout.strip()
-            if head != best_commit:
-                run("git", "checkout", "-q", best_commit, cwd=wt, check=False)
+            run("git", "checkout", "-q", best["commit"], cwd=wt, check=False)
             wait_for_power()
             run(UV, "run", "swarm/run.py", "--lane", f"{lane}-confirm", "--seed", str(s),
-                "--desc", f"confirm {lane} best {best_commit} seed {s}", "--hypothesis", kept[-1]["desc"], cwd=wt,
-                env={"UV_PROJECT_ENVIRONMENT": str(ROOT / ".venv")})
+                "--primary", best.get("primary") or "kappa_id",
+                "--desc", f"confirm {lane} best {best['commit']} seed {s}", "--hypothesis", best["desc"], cwd=wt,
+                env={"UV_PROJECT_ENVIRONMENT": str(ROOT / ".venv"), **holdout})
             mark(step)
+    if finalists:
+        table = confirm_table(ledger(), list(finalists), HOLDOUT_EVAL_SEED)
+        write_tsv(table, ROOT / "results" / "confirm.tsv")
+        for r in table:
+            log(f"confirm {r['lane']}: p={r['p_one_sided']} holm_alpha={r['holm_alpha']} promoted={r['promoted']}")
 
     (STATE / "ALL.done").write_text(time.ctime())
     log("campaign complete")

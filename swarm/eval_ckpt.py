@@ -46,7 +46,7 @@ def main():
     mx.eval(model.parameters())
     meta_path = path.replace(".safetensors", ".json")
     meta = json.load(open(meta_path)) if os.path.exists(meta_path) else {}
-    res = P.evaluate(model, {"steps": meta.get("steps"), "training_seconds": meta.get("train_seconds")})
+    res = P.evaluate(model, {"steps": meta.get("steps"), "training_seconds": meta.get("train_seconds"), "base": a.name})
     res.update(name=a.name, overrides=overrides, checkpoint_meta=meta, sweep={})
     if not a.no_sweep:
         rng = np.random.default_rng(515151)

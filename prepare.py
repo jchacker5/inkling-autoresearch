@@ -10,6 +10,7 @@ Everything in this file is FIXED. Agents edit train.py only. The harness defines
   - evaluate(): val_bpb, reasoning accuracy (in-distribution and out-of-distribution hops),
     test-time loop scaling, memory, latency and analytical KV size.
 """
+import hashlib
 import json
 import math
 import os
@@ -31,7 +32,10 @@ REASONING_MIX = 8                 # rows per 32 that come from the reasoning str
 TRAIN_HOPS = (0, 6)               # inclusive hop range seen in training
 EVAL_HOPS_ID = (2, 4, 6)          # in-distribution evaluation hops
 EVAL_HOPS_OOD = (8, 10)           # out-of-distribution (deeper) hops
-EVAL_PER_HOP = 400
+EVAL_PER_HOP = 800                # prompts per hop = 400 twin pairs
+EVAL_SEED = int(os.environ.get("INKLING_EVAL_SEED", "424242"))   # reasoning eval set; confirmation uses the holdout
+HOLDOUT_EVAL_SEED = 99991         # swarm/campaign.py scores confirmation runs on this set, never seen while screening
+LATENCY_T = (100, 512)            # batch-1 prefill lengths for the compiled-forward latency
 PAIR_BOUND = 0.25                 # pair accuracy reachable by structure + a coin flip, without reading the query
 TASK_VARS = 24                    # variables per problem at every hop (two chains of 11 fit at hop 10)
 VAL_WINDOWS = 384                 # 384 * 512 = ~197k scored bytes
@@ -49,6 +53,8 @@ REASON_TRAIN_BYTES = 16 * 2**20
 BASE_NAME = os.environ.get("INKLING_BASE", "base-v2")      # base-v2 = the v1 base continued on task-v2 data
 BASE_CKPT = os.path.join(CACHE_DIR, f"{BASE_NAME}.safetensors")   # shared warm start, built by pretrain_base.py
 DOC_SEP = 0                       # byte 0 separates documents
+with open(os.path.abspath(__file__), "rb") as _f:
+    HARNESS_SHA = hashlib.sha1(_f.read()).hexdigest()[:10]   # provenance: which harness produced a result
 
 # ---------------------------------------------------------------------------
 # Synthetic multi-hop reasoning task
@@ -143,8 +149,9 @@ def _reasoning_stream(seed, nbytes):
     return np.frombuffer(b"".join(parts)[:nbytes], dtype=np.uint8)
 
 
-def reasoning_eval_set():
-    rng = np.random.default_rng(424242)   # disjoint seed from training stream
+def reasoning_eval_set(seed=None):
+    """Twin-pair eval prompts per hop. Seed defaults to EVAL_SEED (env INKLING_EVAL_SEED); disjoint from training."""
+    rng = np.random.default_rng(EVAL_SEED if seed is None else seed)
     return {h: twin_problems(rng, h, EVAL_PER_HOP) for h in EVAL_HOPS_ID + EVAL_HOPS_OOD}
 
 # ---------------------------------------------------------------------------
@@ -235,8 +242,28 @@ class Batches:
 # Evaluation (fixed)
 # ---------------------------------------------------------------------------
 
-def _call(model, x, loops):
-    return model(x) if loops is None else model(x, loops=loops)
+_LOOPS_ACC = {}   # tag -> [sum of mean_loops_per_token * tokens, tokens]; whole-eval average, not the last call
+
+
+def _call(model, x, loops, tag=None):
+    out = model(x) if loops is None else model(x, loops=loops)
+    m = getattr(model, "mean_loops_per_token", None)
+    if tag is not None and m is not None:
+        acc = _LOOPS_ACC.setdefault(tag, [0.0, 0])
+        acc[0] += float(m) * x.size
+        acc[1] += x.size
+    return out
+
+
+def _mean_loops(*tags):
+    s = sum(_LOOPS_ACC.get(t, [0.0, 0])[0] for t in tags)
+    n = sum(_LOOPS_ACC.get(t, [0.0, 0])[1] for t in tags)
+    return s / n if n else None
+
+
+def kappa(pair_acc):
+    """Pair accuracy rescaled so the structure-plus-coin-flip bound is 0 and perfect is 1."""
+    return (pair_acc - PAIR_BOUND) / (1 - PAIR_BOUND)
 
 
 def _val_bpb(model, loops, mx, nn):
@@ -246,7 +273,7 @@ def _val_bpb(model, loops, mx, nn):
     for i in range(0, VAL_WINDOWS, 16):
         rows = np.stack([val[j * stride: j * stride + SEQ_LEN + 1] for j in range(i, min(i + 16, VAL_WINDOWS))])
         x = mx.array(rows.astype(np.int32))
-        logits = _call(model, x[:, :-1], loops)
+        logits = _call(model, x[:, :-1], loops, ("text", loops))
         ce = nn.losses.cross_entropy(logits.astype(mx.float32), x[:, 1:], reduction="sum")
         total += ce.item(); n += x[:, 1:].size
     return total / n / math.log(2)
@@ -284,7 +311,7 @@ def _reasoning_acc(model, sets, loops, mx, return_single=False):
             x = np.zeros((len(enc), T), dtype=np.int32)
             for r, e in enumerate(enc):
                 x[r, :len(e)] = np.frombuffer(e, dtype=np.uint8)
-            logits = _call(model, mx.array(x), loops)
+            logits = _call(model, mx.array(x), loops, ("reason", loops))
             last = mx.array([len(e) - 1 for e in enc])
             pred = np.array(mx.argmax(logits[mx.arange(len(enc)), last], axis=-1))
             hits += [int(pred[r]) == ord(a) for r, (_, a) in enumerate(chunk)]
@@ -296,14 +323,35 @@ def _reasoning_acc(model, sets, loops, mx, return_single=False):
     return acc
 
 
-def _latency_ms(model, mx):
-    x = mx.zeros((1, SEQ_LEN), dtype=mx.int32)
+def _latency_ms(model, mx, T=SEQ_LEN, reps=30):
+    """Median batch-1 prefill latency of T bytes with a compiled forward (model.logits if the model has it; it
+    must not sync to the host). Falls back to the uncompiled model(x). Returns (ms, compiled)."""
+    x = mx.zeros((1, T), dtype=mx.int32)
+    f, compiled = getattr(model, "logits", None), True
+    try:
+        f = mx.compile(f) if callable(f) else None
+        if f is None:
+            raise TypeError("no model.logits")
+        mx.eval(f(x))
+    except Exception:  # noqa: BLE001
+        f, compiled = model, False
     for _ in range(3):
-        mx.eval(model(x))
+        mx.eval(f(x))
     ts = []
-    for _ in range(10):
-        t = time.perf_counter(); mx.eval(model(x)); ts.append((time.perf_counter() - t) * 1000)
-    return float(np.median(ts))
+    for _ in range(reps):
+        t = time.perf_counter(); mx.eval(f(x)); ts.append((time.perf_counter() - t) * 1000)
+    return float(np.median(ts)), compiled
+
+
+def _kv_bytes(model, loops):
+    """model.kv_bytes_per_token at `loops` iterations (older models take no argument), or None."""
+    kv = getattr(model, "kv_bytes_per_token", None)
+    if not callable(kv):
+        return None
+    try:
+        return kv(loops)
+    except TypeError:
+        return kv()
 
 
 def evaluate(model, train_info):
@@ -312,7 +360,12 @@ def evaluate(model, train_info):
     Model contract:
       model(x) -> logits (B, T, 256) for int32 x of shape (B, T), causal.
       optional: model(x, loops=k) to run k recurrent iterations (enables test-time scaling eval).
-      optional: model.train_loops (int), model.kv_bytes_per_token() (int), model.mean_loops_per_token (float, set after a call).
+      optional: model.train_loops (int), model.kv_bytes_per_token(loops=None) (int),
+                model.mean_loops_per_token (float, set after each call), model.logits(x) (compilable, for latency).
+
+    Memory: the peak so far (training) is read first, then reset, so eval_peak_mem_gb is the evaluation alone.
+    peak_mem_gb = max of the two, checked against MAX_PEAK_MEM_GB. mean_loops_per_token is token-weighted over
+    every eval call at the default loop count (text and reasoning), not the last call's value.
     """
     import mlx.core as mx
     import mlx.nn as nn
@@ -322,6 +375,9 @@ def evaluate(model, train_info):
     params = sum(v.size for _, v in tree_flatten(model.parameters()))
     base_loops = getattr(model, "train_loops", None)
     sets = reasoning_eval_set()
+    train_peak = mx.get_peak_memory() / 2**30
+    mx.reset_peak_memory()
+    _LOOPS_ACC.clear()
 
     t0 = time.perf_counter()
     res = {"val_bpb": _val_bpb(model, None, mx, nn)}
@@ -332,7 +388,14 @@ def evaluate(model, train_info):
     res["reason_by_hop"] = acc
     res["reason_single_floor_by_hop"] = {h: position_floor(p) for h, p in sets.items()}   # per-prompt position rule
     res["reason_floor_id"] = res["reason_floor_ood"] = PAIR_BOUND   # pair accuracy must beat this to show lookups
-    res["mean_loops_per_token"] = getattr(model, "mean_loops_per_token", base_loops)
+    res["kappa_by_hop"] = {h: kappa(a) for h, a in acc.items()}
+    res["kappa_id"] = float(np.mean([res["kappa_by_hop"][h] for h in EVAL_HOPS_ID]))
+    res["kappa_ood"] = float(np.mean([res["kappa_by_hop"][h] for h in EVAL_HOPS_OOD]))
+    res["eval_seed"] = EVAL_SEED
+    ml = _mean_loops(("text", None), ("reason", None))
+    res["mean_loops_per_token"] = ml if ml is not None else base_loops
+    res["mean_loops_text"] = _mean_loops(("text", None))
+    res["mean_loops_reason"] = _mean_loops(("reason", None))
 
     # Test-time scaling: same weights, more (and fewer) loops. Only for models that accept loops=.
     res["scaling"] = {}
@@ -344,17 +407,32 @@ def evaluate(model, train_info):
                     "val_bpb": _val_bpb(model, k, mx, nn),
                     "reason_id": float(np.mean([a[h] for h in EVAL_HOPS_ID])),
                     "reason_ood": float(np.mean([a[h] for h in EVAL_HOPS_OOD])),
+                    "kappa_id": float(np.mean([kappa(a[h]) for h in EVAL_HOPS_ID])),
+                    "kappa_ood": float(np.mean([kappa(a[h]) for h in EVAL_HOPS_OOD])),
+                    "mean_loops_per_token": _mean_loops(("text", k), ("reason", k)),
                 }
+                kvk = _kv_bytes(model, k)
+                res["scaling"][k]["kv_kb_per_token"] = kvk / 1024 if kvk is not None else None
             except TypeError:
                 break
     res["eval_seconds"] = time.perf_counter() - t0
-    res["latency_ms_b1"] = _latency_ms(model, mx)
+    lat = {T: _latency_ms(model, mx, T) for T in LATENCY_T}
+    res["latency_ms_b1"] = lat[SEQ_LEN][0]                        # T = 512, batch 1, compiled forward
+    for T in LATENCY_T:
+        res[f"latency_ms_b1_t{T}"] = lat[T][0]
+    res["latency_compiled"] = all(c for _, c in lat.values())
     res["params"] = params
     res["weights_mb_bf16"] = params * 2 / 2**20
-    kv = getattr(model, "kv_bytes_per_token", None)
-    res["kv_kb_per_token"] = kv() / 1024 if callable(kv) else None
+    kv = _kv_bytes(model, base_loops)                             # at the loop count evaluated above
+    res["kv_kb_per_token"] = kv / 1024 if kv is not None else None
+    res["bytes_f"] = 2 * params + (kv or 0) * SEQ_LEN               # bf16 weights + KV cache at a 512-byte context
+    res["f_mib"] = res["bytes_f"] / 2**20
     res.update(train_info)
-    res["peak_mem_gb"] = mx.get_peak_memory() / 2**30
+    res.setdefault("base", BASE_NAME)
+    res["harness"] = HARNESS_SHA
+    res["train_peak_mem_gb"] = train_peak
+    res["eval_peak_mem_gb"] = mx.get_peak_memory() / 2**30
+    res["peak_mem_gb"] = max(train_peak, res["eval_peak_mem_gb"])
     res["smoke"] = SMOKE
 
     violations = []
@@ -370,13 +448,17 @@ def evaluate(model, train_info):
         json.dump(res, f, indent=2, default=str)
 
     print("---")
-    for k in ("val_bpb", "reason_id", "reason_ood", "reason_floor_id", "reason_floor_ood", "mean_loops_per_token", "params", "weights_mb_bf16",
-              "kv_kb_per_token", "latency_ms_b1", "peak_mem_gb", "training_seconds", "steps", "tokens_M", "valid"):
+    for k in ("val_bpb", "reason_id", "reason_ood", "reason_floor_id", "reason_floor_ood", "kappa_id", "kappa_ood",
+              "mean_loops_per_token", "params", "weights_mb_bf16", "kv_kb_per_token", "bytes_f", "f_mib",
+              "latency_ms_b1", "latency_ms_b1_t100", "train_peak_mem_gb", "eval_peak_mem_gb", "peak_mem_gb",
+              "training_seconds", "steps", "tokens_M", "recipe", "base", "harness", "eval_seed", "valid"):
         v = res.get(k)
         print(f"{k + ':':22s}{v:.6f}" if isinstance(v, float) else f"{k + ':':22s}{v}")
     print("reason_by_hop:        " + " ".join(f"{h}:{a:.3f}" for h, a in acc.items()))
+    print("kappa_by_hop:         " + " ".join(f"{h}:{a:+.3f}" for h, a in res["kappa_by_hop"].items()))
     for k, s in res["scaling"].items():
-        print(f"loops={k:<3d} val_bpb={s['val_bpb']:.4f} reason_id={s['reason_id']:.3f} reason_ood={s['reason_ood']:.3f}")
+        print(f"loops={k:<3d} val_bpb={s['val_bpb']:.4f} reason_id={s['reason_id']:.3f} reason_ood={s['reason_ood']:.3f} "
+              f"kappa_id={s['kappa_id']:+.3f} mean_loops={s['mean_loops_per_token'] or 0:.2f}")
     if violations:
         print("VIOLATIONS: " + "; ".join(violations))
     if SMOKE:

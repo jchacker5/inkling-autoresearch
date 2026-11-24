@@ -22,6 +22,7 @@ CACHE = Path.home() / ".cache" / "inkling-autoresearch"
 FIG = ROOT / "paper" / "figures"
 GEN = ROOT / "paper" / "generated"
 RES = ROOT / "results"
+KEPT = ("keep", "candidate")   # swarm verdicts that count as kept (round-2 rule: "candidate")
 for d in (FIG, GEN, RES / "progress"):
     d.mkdir(parents=True, exist_ok=True)
 
@@ -124,7 +125,7 @@ if base_rows:
 agent_rows = [r for r in ledger if r["lane"] in LANES]
 V("swarm-n", len(agent_rows), "{:d}")
 V("swarm-valid", sum(r["valid"] == "True" for r in agent_rows), "{:d}")
-V("swarm-keeps", sum(r["verdict"] == "keep" for r in agent_rows), "{:d}")
+V("swarm-keeps", sum(r["verdict"] in KEPT for r in agent_rows), "{:d}")
 V("swarm-lanes", len({r["lane"] for r in agent_rows}), "{:d}")
 if agent_rows:
     V("swarm-start", agent_rows[0]["time"][9:11] + ":" + agent_rows[0]["time"][11:13], "{}")
@@ -145,7 +146,7 @@ for lane in LANES:
     rs = [r for r in agent_rows if r["lane"] == lane]
     if not rs:
         continue
-    kept = [r for r in rs if r["verdict"] == "keep" and r["valid"] == "True"]
+    kept = [r for r in rs if r["verdict"] in KEPT and r["valid"] == "True"]
     conf = [r for r in valid if r["lane"] == f"{lane}-confirm"]
     if kept and bl:
         best = kept[-1]
@@ -266,9 +267,9 @@ if agent_rows and bl:
             pts = [(i, f(r, k), r["verdict"]) for i, r in enumerate(agent_rows, 1) if r["lane"] == lane and r["valid"] == "True"]
             if not pts:
                 continue
-            ax.scatter([p[0] for p in pts if p[2] != "keep"], [p[1] for p in pts if p[2] != "keep"], s=14,
+            ax.scatter([p[0] for p in pts if p[2] not in KEPT], [p[1] for p in pts if p[2] not in KEPT], s=14,
                        facecolors="none", edgecolors=LANE_C[lane], marker=LANE_M[lane], linewidths=0.9)
-            ax.scatter([p[0] for p in pts if p[2] == "keep"], [p[1] for p in pts if p[2] == "keep"], s=26,
+            ax.scatter([p[0] for p in pts if p[2] in KEPT], [p[1] for p in pts if p[2] in KEPT], s=26,
                        color=LANE_C[lane], marker=LANE_M[lane], label=lane, edgecolors="white", linewidths=0.6)
         ax.set_title(title)
         ax.set_xlabel("experiment # (agent swarm, chronological)")

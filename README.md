@@ -36,6 +36,8 @@ train.py          AGENT  looped transformer + experiment switches + training loo
 program.md        AGENT  research program: metrics, keep/discard rule, lanes, the loop
 swarm/run.py             one experiment: GPU lock -> train -> evaluate -> ledger -> verdict
 swarm/status.py          leaderboard over results/ledger.tsv
+swarm/campaign.py        the whole campaign: base, 6 baseline seeds, controls, swarm, holdout confirmation
+swarm/confirm.py         confirmation statistics (Welch + Holm) -> results/confirm.tsv
 swarm/launch.sh          one headless Claude Code agent per lane, each in its own git worktree
 tests/                   task correctness, causality and init checks for every switch (CPU, ~2 s)
 results/                 calibration evidence, noise estimates, per-lane notes
@@ -46,6 +48,14 @@ steps. Five minutes from scratch on an M4 is about 250 steps, and reasoning scor
 (`results/calibration.md` has the measurements and the bug checks). So `pretrain_base.py` trains the
 looped backbone once, for hours, and each experiment warm-starts from it and trains for the fixed
 5 minutes with its modification. The baseline is "base plus 5 more minutes of unchanged training".
+Warm starts use recipe R: LR 1e-4 for tensors from the base, 1e-3 for new matrices and 1e-2 for new gates,
+then a short warm-up, a constant phase and a linear decay to 0.
+
+**Screening, then promotion.** Each run is scored on `kappa_id`, pair accuracy rescaled so the
+query-blind bound is 0 (or on `val_bpb`, if its lane declares that). It is compared with the pooled
+baseline seeds: a run is a *candidate* if it beats their mean by 0.92 baseline SDs while `val_bpb`
+stays within +.02. Candidates are only nominations. Promotion needs 6 fresh seeds on a holdout eval set,
+a Welch t-test against 6 fresh baseline seeds and a Holm correction across lanes (`program.md`).
 
 **Why training is serialized.** The budget is wall clock, so two runs sharing the GPU would each get
 half the steps and every comparison would be corrupted. Agents think, read and edit in parallel, but
@@ -127,8 +137,8 @@ leaves a warm-started model unchanged at init.
 4. **Parallel recurrence (LoopFold-style)**, phase 2 in `program.md`: predict later loop states, run
    them in parallel and correct them, measured in real MLX wall clock.
 5. **Hybrid recurrent cores** (for example mLSTM or DeltaNet layers inside the loop).
-6. **Seed noise**: `results/noise.md` with baseline seed variance, so the keep/discard thresholds are
-   calibrated rather than guessed.
+6. **Seed noise**: `results/noise.md` reports the variance of the 6 baseline seeds and the screening bars
+   it implies.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to propose changes and how to report results.
 

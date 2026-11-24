@@ -31,6 +31,13 @@ for the fixed 5 minutes with your modification. Consequences:
   `train.py` refuses a mismatched load. Shape changes need `INIT_FROM_BASE = False`, which is only fair
   against a from-scratch control (recipe lane).
 - The baseline is "base + 5 minutes of unchanged training", not the base itself.
+- Warm starts train with **recipe R** (`RECIPE = "R"` in `train.py`): AdamW with three parameter groups.
+  Tensors loaded from the base get LR 1e-4 (with weight decay). New matrices get 1e-3 and new 1-D tensors
+  (gates, scales, biases) get 1e-2, with no weight decay on new tensors. The schedule is 10 warm-up steps,
+  then constant, then linear decay to 0 over the last 25% of the budget. `load_base` returns the new
+  tensors and `train(recipe=..., new_keys=...)` builds the groups. `RECIPE = "legacy"` restores the old
+  re-warm (one LR of 1e-3, cosine), which is a recipe experiment, not the baseline. `pretrain_base.py`
+  always uses legacy.
 
 ## Fixed rules (from prepare.py)
 
@@ -45,32 +52,53 @@ for the fixed 5 minutes with your modification. Consequences:
 | metric | meaning | direction |
 |---|---|---|
 | `val_bpb` | bits per byte on held-out web text. The knowledge/fluency proxy | lower |
-| `reason_id` | exact-match accuracy, multi-hop variable tracking, 2/4/6 hops (seen depths) | higher |
+| `reason_id` | pair accuracy on twin multi-hop prompts, 2/4/6 hops (seen depths); 400 pairs per hop | higher |
 | `reason_ood` | same task at 8/10 hops (deeper than anything in training) | higher |
-| `scaling` | the same weights evaluated at loops/2 and 2x loops | look for OOD gains at 2x |
-| `mean_loops_per_token` | realised compute with halting | lower at equal quality |
-| `kv_kb_per_token`, `latency_ms_b1`, `peak_mem_gb`, `weights_mb_bf16` | systems costs | lower |
+| `kappa_id`, `kappa_ood` | `(pair - 0.25) / 0.75` averaged over the same hops (`kappa_by_hop` per hop). 0 = what structure plus a coin flip gets without reading the query; 1 = perfect. **`kappa_id` is the default primary metric** | higher |
+| `scaling` | the same weights at loops/2 and 2x loops, each with its own `kappa_*`, `mean_loops_per_token` and `kv_kb_per_token` | look for OOD gains at 2x |
+| `mean_loops_per_token` | realised compute, token-weighted over the whole eval at the default loop count (`mean_loops_text`, `mean_loops_reason` split it) | lower at equal quality |
+| `kv_kb_per_token` | KV cache per byte at the loop count evaluated | lower |
+| `bytes_f`, `f_mib` | 2 x params (bf16 weights) + KV cache at a 512-byte context at the evaluated loop count | lower |
+| `latency_ms_b1` | batch-1 prefill of 512 bytes with a compiled forward (`model.logits`); `latency_ms_b1_t100` for 100 bytes | lower |
+| `train_peak_mem_gb`, `eval_peak_mem_gb`, `peak_mem_gb` | MLX peak in training, in evaluation (reset in between), and their max (the 20 GB check) | lower |
+| `harness`, `base`, `recipe`, `eval_seed` | provenance: prepare.py sha1 (10 hex), base checkpoint name, optimizer recipe, eval set | must match to compare |
 
 The research question lives in the tension between `val_bpb` and `reason_*`. Recurrence may help reasoning
 while hurting factual knowledge. Report both every time.
 
-## Keep / discard rule
+## Keep / discard rule (screening) and promotion
 
-`swarm/run.py` prints a verdict against your lane's last kept run, or, before your lane has one, against
-the **mean of the baseline seeds**. The thresholds below are defaults; once the ledger has 3 baseline seeds,
-run.py raises each gain threshold to 2x the measured seed std and each slack to 1x (see `results/noise.md`):
+Every lane declares **one primary metric**: `kappa_id` (the default) or `val_bpb` (lanes that target
+fluency or cost). Pass it as `swarm/run.py --primary val_bpb` or set `INKLING_PRIMARY`. `swarm/run.py`
+screens each run against the **pooled baseline lane**, never against your lane's last kept run. The pool is
+all valid `baseline` rows with the same `harness`, `base` and eval set. The campaign runs 6 seeds (0..5).
 
-- **keep** if `val_bpb` improves by >= 0.004 and `reason_ood` drops by no more than 0.02, OR
-  `reason_ood` (or `reason_id`) improves by >= 0.03 and `val_bpb` worsens by no more than 0.004, OR
-  equal quality (within noise) at lower `mean_loops_per_token`, `kv_kb_per_token` or params.
-- otherwise **discard**. An invalid run (violations, crash, smoke) is always discarded.
+- **gate**: `val_bpb` <= baseline mean + 0.02. For `val_bpb`-primary lanes, `kappa_id` must also be at most
+  max(0.02, baseline sd) below the baseline mean. A run that fails a gate is **discard**.
+- **candidate** if t = (x - baseline mean) / baseline sd >= **0.92** on the primary metric (sign flipped for
+  `val_bpb`). 0.92 is the one-sided t(0.80, 5 df), which is about one baseline SD. Otherwise **discard**.
+- **pending-noise** while fewer than 3 baseline seeds exist: the noise is unknown, so no verdict yet.
+  Run the baseline seeds (setup step 4) before going on.
+- An invalid run (violations, crash, smoke) is always discarded.
+- "Cheaper" (lower `mean_loops_per_token`, `kv_kb_per_token`, `bytes_f`) is not a verdict of its own. Run it
+  as a `val_bpb`-primary lane, or report it in your notes.
 - Simplicity criterion (Karpathy): a tiny gain bought with lots of code is not worth it. Deleting code at
   equal quality is a win.
-- Claims of improvement need confirmation: re-run a lane's best with `--seed 1` and `--seed 2` (never by
-  editing `SEED`); promote only if the mean beats the baseline mean by more than 2x the seed std. The
-  campaign (`swarm/campaign.py`) does this automatically for every lane's last kept commit.
-- Every ledger row records `seed` and `power`. Runs on battery or Low Power Mode get fewer steps in the same
-  wall clock and are not comparable; the campaign waits for AC power, and so should you.
+
+A candidate is only a nomination; screening at t >= 0.92 lets about 20% of null runs through by design.
+**Promotion** happens in `swarm/campaign.py` after the swarm:
+
+1. Each lane's best candidate (largest t) is re-trained with 6 fresh seeds (100..105). 6 fresh baseline
+   seeds are interleaved with them.
+2. All of these runs are scored on the **holdout** eval set (`INKLING_EVAL_SEED=99991`), which screening
+   never sees. Their ledger verdict is `holdout`.
+3. Each lane gets a one-sided Welch t-test on its primary metric against the holdout baseline seeds, with
+   Holm correction across lanes at family-wise alpha 0.05. A promoted lane must also pass the `val_bpb`
+   gate. The results go to `results/confirm.tsv` (`uv run swarm/confirm.py` recomputes it).
+
+Never confirm by editing `SEED`, and never cherry-pick seeds. Every ledger row records `seed`, `power`,
+`harness`, `base` and `eval_seed`. Runs on battery or Low Power Mode get fewer steps in the same wall clock
+and are not comparable; the campaign waits for AC power, and so should you.
 
 ## Compute control
 
@@ -130,16 +158,17 @@ Setup, once per session:
    an experiment that is already in the ledger.
 3. If the base checkpoint is missing, stop and say so. Do not build it yourself.
 4. If the ledger has no `baseline` rows (the campaign normally runs them before any agent starts), run
-   `uv run swarm/run.py --lane baseline --seed S --desc "baseline seed S"` for S = 0, 1, 2, then
+   `uv run swarm/run.py --lane baseline --seed S --desc "baseline seed S"` for S = 0..5, then
    `uv run swarm/status.py --noise`.
 
 Then LOOP (until your session's experiment budget is used up, or forever if none was given):
 1. Pick one idea. Write the hypothesis in one line before you edit anything.
 2. Edit `train.py` (one idea per experiment).
-3. `uv run swarm/run.py --lane <lane> --desc "<short description>" --hypothesis "<one line>"`.
+3. `uv run swarm/run.py --lane <lane> [--primary val_bpb] --desc "<short description>" --hypothesis "<one line>"`.
    This waits for the GPU lock, trains, evaluates, appends to the ledger, saves the diff and log under
-   `runs/`, and prints `VERDICT: keep|discard (reason)`.
-4. keep: `git commit -am "<lane>: <desc> (val_bpb X, reason_ood Y)"`.
+   `runs/`, and prints `VERDICT: candidate|discard|pending-noise (reason)`.
+4. candidate: `git commit -am "<lane>: <desc> (kappa_id X, val_bpb Y, t Z)"`. The campaign confirms the
+   commit later.
    discard: `git checkout -- train.py`. Never use `git reset --hard` or `git stash`.
 5. Crash: read the tail of the log. Fix an obvious bug and retry once. Otherwise discard and move on.
 6. Every 5 experiments, append 3 to 5 lines to `results/notes-<lane>.md`: what you learned and what is next.

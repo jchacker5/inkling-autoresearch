@@ -27,7 +27,7 @@ import mlx.optimizers as optim
 import numpy as np
 from mlx.utils import tree_flatten
 
-from prepare import BASE_CKPT, REASONING_MIX, SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, Batches, evaluate
+from prepare import BASE_CKPT, BASE_NAME, REASONING_MIX, SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, Batches, evaluate
 
 # MLX keeps freed GPU buffers for reuse. With the variable-length eval batches that cache grew to 15 GB during
 # the 6-hour base run, pushed macOS into swap and filled the disk until the kernel killed training. Cap it.
@@ -67,6 +67,16 @@ LR = 1e-3                          # peak LR (from-scratch base pretraining also
 WEIGHT_DECAY = 0.1
 WARMUP_STEPS = 100
 FINAL_LR_FRAC = 0.05
+# Warm-start optimizer recipe (main() only; pretrain_base.py always uses "legacy" with one LR).
+#   "R": AdamW with three parameter groups -- tensors loaded from the base at R_LR (with weight decay), new
+#        matrices at R_LR_NEW and new vectors/gates/scalars at R_LR_NEW_VEC (no weight decay on new tensors);
+#        R_WARMUP steps of warm-up, constant, then linear decay to 0 over the last R_DECAY_FRAC of the budget.
+#   "legacy": one group at LR with WARMUP_STEPS warm-up and cosine decay to FINAL_LR_FRAC (re-warms the base).
+RECIPE = "R"
+R_LR = 1e-4                        # tensors loaded from the base (4x base-v2's final LR)
+R_LR_NEW = 1e-3                    # new matrices (absent from the base checkpoint)
+R_LR_NEW_VEC = 1e-2                # new 1-D tensors: gates, scales, biases
+R_WARMUP, R_DECAY_FRAC = 10, 0.25
 DTYPE = mx.float32                 # activation dtype; params are fp32 (bf16 only helps if params are cast too)
 
 
@@ -193,8 +203,9 @@ class Inkling(nn.Module):
             self.halt.bias = mx.array([-2.0])   # start by mostly continuing
         self.mean_loops_per_token = float(LOOPS)
 
-    def kv_bytes_per_token(self):
-        core_layers = CORE * (1 if KV_SHARE else self.train_loops)
+    def kv_bytes_per_token(self, loops=None):
+        """KV cache bytes per byte of context at `loops` recurrent iterations (default: the trained count)."""
+        core_layers = CORE * (1 if KV_SHARE else (loops or self.train_loops))
         return 2 * D_MODEL * 2 * (PRELUDE + core_layers / CHUNK + CODA)   # K and V, bf16, per byte
 
     def chunk(self, b):
@@ -315,6 +326,10 @@ class Inkling(nn.Module):
         self.mean_loops_per_token = float(expected.mean().item())
         return logits
 
+    def logits(self, x, loops=None):
+        """Same output as __call__ without the host sync, so the harness can mx.compile it for latency."""
+        return self.forward(x, loops, hard_halt=HALTING, exit_tau=EXIT_TAU)[0]
+
     def loss(self, batch, loops, consist_loop=-1):
         """consist_loop: earlier loop (0-based, < loops-1) distilled from the final loop this step; -1 = none.
         It is sampled outside the compiled step (one compiled graph per value), costing ~1 extra coda pass."""
@@ -351,15 +366,47 @@ def load_base(model, path):
     model.load_weights([(k, v) for k, v in base.items() if k in own], strict=False)
     new = sorted(k for k in own if k not in base)
     print(f"warm-started from {path}; {len(new)} new tensors at init: {new[:8]}")
+    return set(new)
 
 
-def train(model, budget, lr_peak, seed=SEED, log_every=50, on_tick=None, stop_after=None):
+def lr_scale(recipe, step, progress):
+    """LR multiplier at optimizer step `step` (0-based) and budget fraction `progress` in [0, 1]."""
+    if recipe == "R":
+        return min(1.0, (step + 1) / R_WARMUP) * max(0.0, min(1.0, (1 - progress) / R_DECAY_FRAC))
+    return min(1.0, (step + 1) / WARMUP_STEPS) * (FINAL_LR_FRAC + (1 - FINAL_LR_FRAC) * 0.5 * (1 + math.cos(math.pi * progress)))
+
+
+def param_groups(new_keys):
+    """Recipe R groups as (name, lr, weight_decay, filter(path, array)); the last group takes everything else."""
+    new_keys = set(new_keys)
+    return [("new_vec", R_LR_NEW_VEC, 0.0, lambda p, a: p in new_keys and a.ndim <= 1),
+            ("new_mat", R_LR_NEW, 0.0, lambda p, a: p in new_keys),
+            ("base", R_LR, WEIGHT_DECAY, None)]
+
+
+def make_optimizer(model, recipe, lr_peak, new_keys=()):
+    """Returns (optimizer, [(sub-optimizer, peak lr)]). The caller sets each sub-optimizer's LR every step
+    (MultiOptimizer's own learning_rate setter would give every group the same LR)."""
+    if recipe != "R":
+        opt = optim.AdamW(learning_rate=lr_peak, weight_decay=WEIGHT_DECAY, betas=[0.9, 0.95])
+        return opt, [(opt, lr_peak)]
+    groups = param_groups(new_keys)
+    subs = [optim.AdamW(learning_rate=lr, weight_decay=wd, betas=[0.9, 0.95]) for _, lr, wd, _ in groups]
+    opt = optim.MultiOptimizer(subs, filters=[f for _, _, _, f in groups[:-1]])
+    opt.init(model.trainable_parameters())          # before mx.compile captures opt.state
+    return opt, [(o, lr) for o, (_, lr, _, _) in zip(subs, groups)]
+
+
+def train(model, budget, lr_peak, seed=SEED, log_every=50, on_tick=None, stop_after=None, recipe="legacy",
+          new_keys=()):
     """Train `model` for `budget` seconds of wall clock (compile warm-up excluded). Returns train_info.
 
     stop_after: stop early after this many seconds while keeping the LR schedule of the full budget
-    (used to snapshot control models at a matched point of the same schedule)."""
+    (used to snapshot control models at a matched point of the same schedule).
+    recipe: "legacy" (one LR, lr_peak, cosine; pretrain_base.py) or "R" (warm starts; see RECIPE). new_keys are
+    the parameter paths absent from the base checkpoint (load_base's return value); lr_peak is unused under R."""
     rng = np.random.default_rng(seed)
-    opt = optim.AdamW(learning_rate=lr_peak, weight_decay=WEIGHT_DECAY, betas=[0.9, 0.95])
+    opt, groups = make_optimizer(model, recipe, lr_peak, new_keys)
     grad_fn = nn.value_and_grad(model, lambda b, k, c: model.loss(b, k, c))
     state = [model.state, opt.state]
     steps_fns = {}
@@ -381,14 +428,17 @@ def train(model, budget, lr_peak, seed=SEED, log_every=50, on_tick=None, stop_af
     while t_train < end:
         t0 = time.perf_counter()
         progress = t_train / budget
-        lr = lr_peak * min(1.0, (step + 1) / WARMUP_STEPS) * (FINAL_LR_FRAC + (1 - FINAL_LR_FRAC) * 0.5 * (1 + math.cos(math.pi * progress)))
-        opt.learning_rate = lr
+        s = lr_scale(recipe, step, progress)
+        for o, lr0 in groups:
+            o.learning_rate = lr0 * s
+        lr = groups[-1][1] * s             # logged: the base / single group
         k = int(rng.integers(1, 2 * LOOPS)) if RANDOM_LOOPS else LOOPS
         c = int(rng.integers(0, k - 1)) if (LOOP_CONSIST > 0 and k > 1) else -1
+        fresh = (k, c) not in steps_fns
         loss, ce = step_fn(k, c)(mx.array(next(data)))
         mx.eval(loss, ce, state)
         dt = time.perf_counter() - t0
-        if step >= 2:                      # exclude compilation warm-up from the budget
+        if step >= 2 and not fresh:        # exclude compilation (first steps, each new loop count) from the budget
             t_train += dt
         tokens += BATCH_SIZE * SEQ_LEN
         ce_ema = ce.item() if ce_ema is None else 0.98 * ce_ema + 0.02 * ce.item()
@@ -399,7 +449,7 @@ def train(model, budget, lr_peak, seed=SEED, log_every=50, on_tick=None, stop_af
         step += 1
         if on_tick:
             on_tick(step, t_train)
-    return {"training_seconds": t_train, "steps": step, "tokens_M": tokens / 1e6}
+    return {"training_seconds": t_train, "steps": step, "tokens_M": tokens / 1e6, "recipe": recipe}
 
 
 def main():
@@ -408,12 +458,15 @@ def main():
     mx.eval(model.parameters())
     n_params = sum(v.size for _, v in tree_flatten(model.parameters()))
     print(f"params: {n_params/1e6:.2f}M  effective depth: {PRELUDE + CORE*LOOPS + CODA}")
+    new_keys = set()
     if INIT_FROM_BASE:
         if not os.path.exists(BASE_CKPT):
             raise SystemExit(f"FAIL: {BASE_CKPT} missing; run `uv run pretrain_base.py` once (or set INIT_FROM_BASE=False)")
-        load_base(model, BASE_CKPT)
-    info = train(model, TIME_BUDGET, LR)
+        new_keys = load_base(model, BASE_CKPT)
+    recipe = RECIPE if INIT_FROM_BASE else "legacy"    # recipe R is defined for warm starts only
+    info = train(model, TIME_BUDGET, LR, recipe=recipe, new_keys=new_keys)
     info["init_from_base"] = INIT_FROM_BASE
+    info["base"] = BASE_NAME if INIT_FROM_BASE else "scratch"
     evaluate(model, info)
 
 
