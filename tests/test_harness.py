@@ -22,7 +22,7 @@ def test_eval_constants_and_provenance():
     assert P.EVAL_PER_HOP == (40 if P.SMOKE else 800)
     assert len(P.HARNESS_SHA) == 10 and int(P.HARNESS_SHA, 16) >= 0
     assert P.HOLDOUT_EVAL_SEED != P.EVAL_SEED
-    assert P.kappa(P.PAIR_BOUND) == 0 and P.kappa(1.0) == 1
+    assert P.kappa(P.GROUP_BOUND) == 0 and P.kappa(1.0) == 1
 
 
 def test_eval_seed_selects_a_different_set(monkeypatch):
@@ -98,7 +98,7 @@ def test_evaluate_reports_round2_fields(monkeypatch, tmp_path):
     assert res["scaling"][8]["mean_loops_per_token"] == pytest.approx(8)
     assert res["mean_loops_per_token"] == pytest.approx(4)
     for h, a in res["reason_by_hop"].items():
-        assert res["kappa_by_hop"][h] == pytest.approx((a - .25) / .75)
+        assert res["kappa_by_hop"][h] == pytest.approx(P.kappa(a))
     assert res["kappa_id"] == pytest.approx(np.mean([res["kappa_by_hop"][h] for h in P.EVAL_HOPS_ID]))
     assert res["kappa_ood"] == pytest.approx(np.mean([res["kappa_by_hop"][h] for h in P.EVAL_HOPS_OOD]))
     assert res["peak_mem_gb"] == max(res["train_peak_mem_gb"], res["eval_peak_mem_gb"])

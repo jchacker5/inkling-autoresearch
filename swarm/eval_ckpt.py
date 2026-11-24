@@ -50,7 +50,7 @@ def main():
     res.update(name=a.name, overrides=overrides, checkpoint_meta=meta, sweep={})
     if not a.no_sweep:
         rng = np.random.default_rng(515151)
-        sets = {h: P.twin_problems(rng, h, a.per_hop) for h in SWEEP_HOPS}
+        sets = {h: P.eval_problems(rng, h, a.per_hop) for h in SWEEP_HOPS}
         for k in SWEEP_LOOPS:
             acc = P._reasoning_acc(model, sets, k, mx)
             res["sweep"][k] = {"val_bpb": P._val_bpb(model, k, mx, nn), "acc_by_hop": acc}

@@ -36,7 +36,8 @@ EVAL_PER_HOP = 800                # prompts per hop = 400 twin pairs
 EVAL_SEED = int(os.environ.get("INKLING_EVAL_SEED", "424242"))   # reasoning eval set; confirmation uses the holdout
 HOLDOUT_EVAL_SEED = 99991         # swarm/campaign.py scores confirmation runs on this set, never seen while screening
 LATENCY_T = (100, 512)            # batch-1 prefill lengths for the compiled-forward latency
-PAIR_BOUND = 0.25                 # pair accuracy reachable by structure + a coin flip, without reading the query
+GROUP_BOUND = 1 / 16              # quad accuracy of independent coin flips between the two chains (rules that ignore
+                                  # the question or guess by statement order score 0 on quads)
 TASK_VARS = 24                    # variables per problem at every hop (two chains of 11 fit at hop 10)
 VAL_WINDOWS = 384                 # 384 * 512 = ~197k scored bytes
 
@@ -132,8 +133,53 @@ def make_problem(rng, hops):
 
 
 def twin_problems(rng, hops, n):
-    """n prompts (n even) as n/2 adjacent twin pairs; _reasoning_acc scores them as pairs."""
+    """n prompts (n even) as n/2 adjacent twin pairs."""
     return [t for _ in range(n // 2) for t in make_pair(rng, hops)]
+
+
+def _cross(stmts, ends, rng):
+    """Crossed twin (mechanism debater, round 2): swap the parents of A[i] and B[i] at one hop i, so the two chains
+    exchange roots below i. Two bytes change; every position stays. Returns the two crossed prompts, or None if no
+    hop keeps parents before children. A rule that does not follow the pointers at hop i answers the original and
+    the crossed problem identically, so it cannot get all four prompts right."""
+    order = [x.split("=") for x in stmts.split(";")]
+    par = dict(order)
+    pos = {v: k for k, (v, _) in enumerate(order)}
+    A, B = [ends[0]], [ends[1]]
+    for ch in (A, B):
+        while not par[ch[-1]].isdigit():
+            ch.append(par[ch[-1]])
+        ch.reverse()                                   # root first
+    ok = [i for i in range(1, len(A)) if pos[B[i - 1]] < pos[A[i]] and pos[A[i - 1]] < pos[B[i]]]
+    if not ok:
+        return None
+    i = ok[int(rng.integers(len(ok)))]
+    par[A[i]], par[B[i]] = B[i - 1], A[i - 1]
+    body = ";".join(f"{v}={par[v]}" for v, _ in order)
+
+    def val(v):
+        while not par[v].isdigit():
+            v = par[v]
+        return par[v]
+    return [(f"{body};?{q}=", val(q)) for q in ends]
+
+
+def group_size(hops):
+    """Prompts per scored group: a quad (twins, original and crossed) for hops >= 1; a twin pair at hop 0."""
+    return 2 if hops == 0 else 4
+
+
+def eval_problems(rng, hops, n):
+    """n prompts in adjacent groups of group_size(hops); _reasoning_acc counts a group only if all are right."""
+    if hops == 0:
+        return twin_problems(rng, 0, n)
+    out = []
+    while len(out) < n:
+        stmts, ends, val = _forest(rng, hops)
+        crossed = _cross(stmts, ends, rng)
+        if crossed is not None:
+            out += [(f"{stmts};?{q}=", str(val[q])) for q in ends] + crossed
+    return out[:n - n % 4]
 
 
 def _reasoning_stream(seed, nbytes):
@@ -152,7 +198,7 @@ def _reasoning_stream(seed, nbytes):
 def reasoning_eval_set(seed=None):
     """Twin-pair eval prompts per hop. Seed defaults to EVAL_SEED (env INKLING_EVAL_SEED); disjoint from training."""
     rng = np.random.default_rng(EVAL_SEED if seed is None else seed)
-    return {h: twin_problems(rng, h, EVAL_PER_HOP) for h in EVAL_HOPS_ID + EVAL_HOPS_OOD}
+    return {h: eval_problems(rng, h, EVAL_PER_HOP) for h in EVAL_HOPS_ID + EVAL_HOPS_OOD}
 
 # ---------------------------------------------------------------------------
 # Data download / build
@@ -261,9 +307,9 @@ def _mean_loops(*tags):
     return s / n if n else None
 
 
-def kappa(pair_acc):
-    """Pair accuracy rescaled so the structure-plus-coin-flip bound is 0 and perfect is 1."""
-    return (pair_acc - PAIR_BOUND) / (1 - PAIR_BOUND)
+def kappa(group_acc):
+    """Quad accuracy rescaled so independent coin flips between the chains score 0 and perfect is 1."""
+    return (group_acc - GROUP_BOUND) / (1 - GROUP_BOUND)
 
 
 def _val_bpb(model, loops, mx, nn):
@@ -298,8 +344,8 @@ def encode_prompt(prompt, align=1):
 
 
 def _reasoning_acc(model, sets, loops, mx, return_single=False):
-    """Pair accuracy per hop (sets hold adjacent twin prompts, see twin_problems); chance-free floor 0, .25 = the
-    structure-plus-coin-flip bound. return_single also returns per-prompt accuracy."""
+    """Group accuracy per hop: sets hold adjacent groups of group_size(h) prompts (eval_problems), and a group counts
+    only if every prompt is right (quads for h >= 1: GROUP_BOUND = 1/16). return_single also returns per-prompt accuracy."""
     acc, single = {}, {}
     align = getattr(model, "align", 1)
     for h, probs in sets.items():
@@ -317,7 +363,8 @@ def _reasoning_acc(model, sets, loops, mx, return_single=False):
             hits += [int(pred[r]) == ord(a) for r, (_, a) in enumerate(chunk)]
         hits = np.array(hits)
         single[h] = float(hits.mean())
-        acc[h] = float((hits[0::2] & hits[1::2]).mean())   # twins are adjacent: a pair counts if both are right
+        g = group_size(h)
+        acc[h] = float(hits[: len(hits) - len(hits) % g].reshape(-1, g).all(axis=1).mean())
     if return_single:
         return acc, single
     return acc
@@ -387,7 +434,7 @@ def evaluate(model, train_info):
     res["reason_ood"] = float(np.mean([acc[h] for h in EVAL_HOPS_OOD]))
     res["reason_by_hop"] = acc
     res["reason_single_floor_by_hop"] = {h: position_floor(p) for h, p in sets.items()}   # per-prompt position rule
-    res["reason_floor_id"] = res["reason_floor_ood"] = PAIR_BOUND   # pair accuracy must beat this to show lookups
+    res["reason_floor_id"] = res["reason_floor_ood"] = GROUP_BOUND   # quad accuracy must beat this to show lookups
     res["kappa_by_hop"] = {h: kappa(a) for h, a in acc.items()}
     res["kappa_id"] = float(np.mean([res["kappa_by_hop"][h] for h in EVAL_HOPS_ID]))
     res["kappa_ood"] = float(np.mean([res["kappa_by_hop"][h] for h in EVAL_HOPS_OOD]))

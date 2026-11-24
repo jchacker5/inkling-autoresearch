@@ -151,7 +151,7 @@ def main():
     model.eval()
     L = T.LOOPS
     rng = np.random.default_rng(616161)
-    sets = {h: P.twin_problems(rng, h, a.per_hop) for h in HOPS}
+    sets = {h: P.eval_problems(rng, h, a.per_hop) for h in HOPS}
     res = {"name": a.name, "train_loops": L, "reasoning": reasoning_landing(model, sets, L),
            "reasoning_2x": reasoning_landing(model, sets, 2 * L), "text": text_landing(model, L)}
     for h, v in res["reasoning"].items():

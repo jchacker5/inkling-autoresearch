@@ -63,7 +63,7 @@ def test_no_position_shortcut_and_fixed_size():
     sets = P.reasoning_eval_set()
     for h, probs in sets.items():
         assert all(len(p.split(";")) - 1 == P.TASK_VARS for p, _ in probs)
-        assert P.position_floor(probs) < 0.30, (h, P.position_floor(probs))
+        assert P.position_floor(probs) < 0.35, (h, P.position_floor(probs))   # ~1/#roots; scoring is by quad
 
 
 def test_root_digits_are_distinct():
@@ -99,8 +99,41 @@ def test_twins_share_statements_have_equal_depth_and_differ(hops):
 
 
 def test_query_blind_rule_scores_zero_pairs():
-    sets = P.reasoning_eval_set()
-    for probs in sets.values():
+    rng = np.random.default_rng(5)
+    for h in (2, 6, 10):
+        probs = P.twin_problems(rng, h, 200)
         pairs = list(zip(probs[0::2], probs[1::2]))
         first_digit = [re.findall(r"\d", a[0])[0] for a, _ in pairs]
         assert sum(fd == a[1] and fd == b[1] for fd, (a, b) in zip(first_digit, pairs)) == 0
+
+
+@pytest.mark.parametrize("hops", [1, 2, 4, 8, 10])
+def test_crossed_twins_swap_answers_and_change_two_bytes(hops):
+    rng = np.random.default_rng(20 + hops)
+    probs = P.eval_problems(rng, hops, 400)
+    assert len(probs) % 4 == 0
+    for k in range(0, len(probs), 4):
+        (pa, aa), (pb, ab), (ca, xa), (cb, xb) = probs[k:k + 4]
+        assert (xa, xb) == (ab, aa) and aa != ab               # crossing exchanges the two answers
+        assert len(pa) == len(ca) and sum(u != v for u, v in zip(pa, ca)) == 2
+        sa = re.fullmatch(r"(.*);\?([a-z])=", ca).group(1)
+        look = resolve(sa)
+        assert str(look(re.fullmatch(r".*;\?([a-z])=", ca).group(1))[0]) == xa
+        seen = set()                                           # crossed statements still define before use
+        for st in sa.split(";"):
+            v, y = st.split("=")
+            assert y.isdigit() or y in seen
+            seen.add(v)
+
+
+def test_order_and_query_blind_rules_score_zero_quads():
+    """Any rule that answers the original and crossed problems identically (it never reads the crossed hop)
+    gets at most two of four right: e.g. 'answer the root that comes later for the later end'."""
+    rng = np.random.default_rng(7)
+    for h in (2, 4, 6, 8, 10):
+        probs = P.eval_problems(rng, h, 400)
+        for k in range(0, len(probs), 4):
+            q = probs[k:k + 4]
+            # a rule that ignores the crossed hop gives the crossed prompts the original answers
+            rule = [q[0][1], q[1][1], q[0][1], q[1][1]]
+            assert not all(r == a for r, (_, a) in zip(rule, q))
