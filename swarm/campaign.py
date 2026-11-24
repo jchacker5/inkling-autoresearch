@@ -155,7 +155,43 @@ def main():
         run(UV, "run", "swarm/status.py", "--noise")
         mark("noise")
 
-    # 3. swarm
+    # 3. overthinking analysis of the base (eval only, ~15 min)
+    if not done("landing-base"):
+        wait_for_power()
+        if run(UV, "run", "swarm/landing.py", "--name", "base") == 0:
+            mark("landing-base")
+
+    # 4. controls and chunked-core models on the same 6-hour schedule, stopped at --control-hours.
+    #    These need no agents, so they run before the swarm; the swarm's lanes can then use the
+    #    research/debate results (results/next_lanes.txt).
+    controls = {"control-4L": ["LOOPS=1"], "control-10L": ["LOOPS=1", "CORE=8"],
+                "chunk4": ["CHUNK=4"], "chunk2": ["CHUNK=2"]}
+    for name, ov in controls.items():
+        if not done(name):
+            if train_ckpt(name, a.base_hours, a.control_hours, ov):
+                mark(name)
+
+    # 5. evaluations (looped models get the test-time loop sweep and the landing analysis)
+    h = int(a.control_hours)
+    evals = [(f"base-{h}h", [], True), ("base", [], True)]
+    evals += [(f"{name}-{h}h", ov, "LOOPS=1" not in ov) for name, ov in controls.items()]
+    for name, ov, looped in evals:
+        step = f"eval-{name}"
+        if done(step) or not (CACHE / f"{name}.safetensors").exists():
+            continue
+        wait_for_power()
+        cmd = [UV, "run", "swarm/eval_ckpt.py", "--name", name] + (["--set", *ov] if ov else []) + ([] if looped else ["--no-sweep"])
+        if run(*cmd) == 0:
+            mark(step)
+        if looped and name.startswith("chunk") and not done(f"landing-{name}"):
+            if run(UV, "run", "swarm/landing.py", "--name", name, "--set", *ov, "EXIT_METRIC='state'") == 0:
+                mark(f"landing-{name}")
+
+    # 6. swarm. Lanes come from results/next_lanes.txt when it exists (written after the debate stage).
+    lanes = a.lanes
+    nl = ROOT / "results" / "next_lanes.txt"
+    if nl.exists() and nl.read_text().split():
+        lanes = nl.read_text().split()
     if not done("swarm"):
         if subprocess.run(["pgrep", "-f", "swarm/launch.sh"], capture_output=True).returncode == 0:
             log("swarm already running (campaign restarted); waiting for it")
@@ -163,12 +199,13 @@ def main():
                 time.sleep(60)
         else:
             wait_for_power()
-            run("bash", "swarm/launch.sh", a.tag, *a.lanes,
+            log(f"swarm lanes: {lanes}")
+            run("bash", "swarm/launch.sh", a.tag, *lanes,
                 env={"SESSIONS": str(a.sessions), "EXPERIMENTS": str(a.experiments)}, check=False)
         mark("swarm")
 
-    # 4. confirm each lane's best kept commit with seeds 1 and 2
-    for lane in a.lanes:
+    # 7. confirm each lane's best kept commit with seeds 1 and 2
+    for lane in lanes:
         wt = ROOT / "lanes" / lane
         kept = [r for r in ledger() if r["lane"] == lane and r["verdict"] == "keep" and r["valid"] == "True"]
         if not kept or not wt.exists():
@@ -187,26 +224,6 @@ def main():
             run(UV, "run", "swarm/run.py", "--lane", f"{lane}-confirm", "--seed", str(s),
                 "--desc", f"confirm {lane} best {best_commit} seed {s}", "--hypothesis", kept[-1]["desc"], cwd=wt,
                 env={"UV_PROJECT_ENVIRONMENT": str(ROOT / ".venv")})
-            mark(step)
-
-    # 5. controls on the same 6-hour schedule, stopped at --control-hours
-    controls = {"control-4L": ["LOOPS=1"], "control-10L": ["LOOPS=1", "CORE=8"]}
-    for name, ov in controls.items():
-        if not done(name):
-            if train_ckpt(name, a.base_hours, a.control_hours, ov):
-                mark(name)
-
-    # 6. evaluations
-    h = int(a.control_hours)
-    evals = [(f"base-{h}h", [], True), ("base", [], True)]
-    evals += [(f"{name}-{h}h", ov, False) for name, ov in controls.items()]
-    for name, ov, sweep in evals:
-        step = f"eval-{name}"
-        if done(step) or not (CACHE / f"{name}.safetensors").exists():
-            continue
-        wait_for_power()
-        cmd = [UV, "run", "swarm/eval_ckpt.py", "--name", name] + (["--set", *ov] if ov else []) + ([] if sweep else ["--no-sweep"])
-        if run(*cmd) == 0:
             mark(step)
 
     (STATE / "ALL.done").write_text(time.ctime())
