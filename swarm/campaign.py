@@ -108,6 +108,17 @@ def refresh():
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
+def hold():
+    """While campaign/HOLD exists, wait (and keep picking up new code): lets a short experiment queue use the GPU
+    between campaign stages without competing with a wall-clock training budget."""
+    if (STATE / "HOLD").exists():
+        log("HOLD present: waiting")
+        while (STATE / "HOLD").exists():
+            time.sleep(60)
+        log("HOLD released")
+        refresh()
+
+
 def meta(name):
     p = CACHE / f"{name}.json"
     return json.loads(p.read_text()) if p.exists() else None
@@ -233,6 +244,7 @@ def main():
         controls = {k: v for k, v in controls.items() if k in ("looped", "control-4L")}
     for name, ov in controls.items():
         refresh()
+        hold()
         if not done(name):
             if train_ckpt(name, a.base_hours, a.control_hours, ov):
                 mark(name)

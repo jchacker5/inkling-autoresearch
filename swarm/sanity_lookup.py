@@ -29,7 +29,39 @@ WITH_REPLACEMENT = True   # asking every key exactly once lets "most frequent un
 LET = np.frombuffer(string.ascii_lowercase.encode(), np.uint8)
 
 
+HOPS = 0                  # >0: equal-length chains ("b=a"), see chain_line
+
+
+def chain_line(rng, nv, hops):
+    """nv // (hops + 1) roots with distinct digits, each heading one chain of exactly `hops` pointers ("b=a"), so
+    every value is equally common: a question-blind guess scores 1 / roots at every depth. (Random forests let
+    "answer the most common value" score .51 at hop 1 and .73 at hop 2.) Statements come in a random order that
+    keeps parents before children. Returns (bytes, per-question hop depth, -1 for repeats)."""
+    R = max(2, nv // (hops + 1))
+    vs = rng.choice(LET, R * (hops + 1), replace=False).reshape(R, hops + 1)
+    digits = rng.choice(10, R, replace=False)
+    nxt, order = [0] * R, []
+    while len(order) < R * (hops + 1):            # random interleaving of the chains, each in its own order
+        r = int(rng.choice([k for k in range(R) if nxt[k] <= hops]))
+        order.append((r, nxt[r]))
+        nxt[r] += 1
+    st = []
+    for r, d in order:
+        st += [vs[r, d], 61, 48 + digits[r] if d == 0 else vs[r, d - 1], 59]
+    flat = [(r, d) for r in range(R) for d in range(hops + 1)]
+    q = rng.integers(0, len(flat), len(flat))
+    qs, ds, seen = [], [], set()
+    for i in q:
+        r, d = flat[i]
+        qs += [63, vs[r, d], 61, 48 + digits[r]]
+        ds.append(d if int(i) not in seen else -1)    # a repeat can copy its earlier answer: score first asks only
+        seen.add(int(i))
+    return np.array([10] + st + qs, np.uint8), ds
+
+
 def line(rng, nv):
+    if HOPS > 0:
+        return chain_line(rng, nv, HOPS)[0]
     vs = rng.choice(LET, nv, replace=False)
     ds = rng.integers(48, 58, nv).astype(np.uint8)
     q = rng.integers(0, nv, nv) if WITH_REPLACEMENT else rng.permutation(nv)
@@ -63,8 +95,11 @@ def main():
     ap.add_argument("--len", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--wd", type=float, default=0.1)
+    ap.add_argument("--hops", type=int, default=0, help="chain depth (0 = pure lookup)")
     ap.add_argument("set", nargs="*")
     a = ap.parse_args()
+    global HOPS
+    HOPS = a.hops
     PB.apply_overrides(a.set)
     mx.random.seed(0)
     model = T.Inkling()
@@ -87,8 +122,20 @@ def main():
         opt.update(model, g)
         return loss
 
-    ex = rows(erng, 64, a.len, a.nv)
-    em = answer_mask(ex)
+    if HOPS > 0:          # eval: whole lines, answers grouped by depth
+        lines = [chain_line(erng, a.nv, HOPS) for _ in range(64)]
+        width = max(len(b) for b, _ in lines)
+        ex = np.full((64, width), 10, np.uint8)
+        for i, (b, _) in enumerate(lines):
+            ex[i, :len(b)] = b
+        em = answer_mask(ex)
+        edepth = np.full(em.shape, -1)
+        for i, (b, ds) in enumerate(lines):
+            pos = np.nonzero(em[i])[0]
+            edepth[i, pos[:len(ds)]] = ds[:len(pos)]
+    else:
+        ex = rows(erng, 64, a.len, a.nv)
+        em = answer_mask(ex)
     t0, i = time.time(), 0
     while time.time() - t0 < a.minutes * 60:
         x = rows(rng, 32, a.len + 1, a.nv)
@@ -102,7 +149,11 @@ def main():
             p = np.array(mx.argmax(model(mx.array(ex[:, :-1].astype(np.int32))), -1))
             model.train()
             acc = (p == ex[:, 1:])[em].mean()
-            print(f"step {i:5d} t {time.time()-t0:5.0f}s loss {loss.item():.3f} answer_acc {acc:.3f}", flush=True)
+            by = ""
+            if HOPS > 0:
+                ok = p == ex[:, 1:]
+                by = " " + " ".join(f"h{d}={ok[edepth == d].mean():.3f}" for d in range(HOPS + 1) if (edepth == d).any())
+            print(f"step {i:5d} t {time.time()-t0:5.0f}s loss {loss.item():.3f} answer_acc {acc:.3f}{by}", flush=True)
         i += 1
 
 
