@@ -188,7 +188,12 @@ def _reasoning_stream(seed, nbytes):
     while total < nbytes:
         stmts, ends, val = _forest(rng, int(rng.integers(TRAIN_HOPS[0], TRAIN_HOPS[1] + 1)))
         first = ends[int(rng.integers(2))]
-        rest = [v for v in rng.permutation(list(val)) if v != first]
+        # Task v4: later questions are drawn WITH replacement. Asking every variable exactly once (v3) lets a
+        # question-blind rule answer by elimination (most frequent value not yet used: .458 on pure 8-key lookup),
+        # and the models learned that instead of lookup (results/sanity-elim/). A repeated question can still be
+        # answered by copying its earlier answer, which is a lookup.
+        names = list(val)
+        rest = [names[i] for i in rng.integers(0, len(names), len(names) - 1)]
         qs = "".join(f"?{v}={val[v]}" for v in [first] + rest)
         s = f"{stmts};{qs}\n".encode()
         parts.append(s); total += len(s)
@@ -248,7 +253,7 @@ def prepare():
         arr.tofile(out)
         os.remove(pq_path)            # disk is precious; the .bin is all we need
         print(f"wrote {out}: {len(arr)/2**20:.1f} MiB")
-    out = os.path.join(CACHE_DIR, "reason_train_v3.bin")
+    out = os.path.join(CACHE_DIR, "reason_train_v4.bin")
     if not os.path.exists(out):
         _reasoning_stream(1234, REASON_TRAIN_BYTES).tofile(out)
         print(f"wrote {out}")
@@ -269,7 +274,7 @@ class Batches:
     """Infinite iterator of (B, SEQ_LEN+1) uint8 windows. Rows [0, mix) are reasoning, the rest text."""
 
     def __init__(self, batch_size, seed=0):
-        self.text, self.reason = _load("train"), _load("reason_train_v3")
+        self.text, self.reason = _load("train"), _load("reason_train_v4")
         self.B = batch_size
         self.mix = max(1, round(REASONING_MIX * batch_size / 32))
         self.rng = np.random.default_rng(seed)

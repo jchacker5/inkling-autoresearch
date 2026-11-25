@@ -4,7 +4,9 @@
 
 Every row is pure lookup lines "a=5;k=2;...;?k=2?a=5..." (NV distinct letters, random digits, every key queried
 once in random order), so a working retrieval circuit is the only way to lower the answer loss. Prints answer
-accuracy on fresh lines every 250 steps. Small transformers learn this (MQAR) within a few thousand steps.
+accuracy on fresh lines every 250 steps. Queries are drawn WITH replacement: if every key is asked exactly once,
+a query-blind elimination rule (most frequent digit not yet answered) scores .458 with 8 keys, and models learn
+that instead of lookup (results/sanity-elim/). Small transformers learn this (MQAR) within a few thousand steps.
 """
 import argparse
 import os
@@ -23,13 +25,14 @@ import mlx.optimizers as optim  # noqa: E402
 import pretrain_base as PB  # noqa: E402
 import train as T  # noqa: E402
 
+WITH_REPLACEMENT = True   # asking every key exactly once lets "most frequent unused digit" score .458 (8 keys)
 LET = np.frombuffer(string.ascii_lowercase.encode(), np.uint8)
 
 
 def line(rng, nv):
     vs = rng.choice(LET, nv, replace=False)
     ds = rng.integers(48, 58, nv).astype(np.uint8)
-    q = rng.permutation(nv)
+    q = rng.integers(0, nv, nv) if WITH_REPLACEMENT else rng.permutation(nv)
     st = np.stack([vs, np.full(nv, 61, np.uint8), ds, np.full(nv, 59, np.uint8)], 1).reshape(-1)
     qs = np.stack([np.full(nv, 63, np.uint8), vs[q], np.full(nv, 61, np.uint8), ds[q]], 1).reshape(-1)
     return np.concatenate([[10], st, qs]).astype(np.uint8)

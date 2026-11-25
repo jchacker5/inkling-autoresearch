@@ -5,7 +5,7 @@
 1. induction: a random 100-letter string repeated; accuracy on the second copy.
 2. pure lookup: "a=5;b=7;...;" with N roots only (distinct letters), then every variable queried once in random
    order ("?b=7?a=5..."); accuracy on the answer digits. Chance is .10.
-3. training lines (reason_train_v3): answer accuracy split by the queried variable's hop depth and by whether it is
+3. training lines (reason_train_v4): answer accuracy split by the queried variable's hop depth and by whether it is
    the line's first query.
 """
 import collections
@@ -54,7 +54,7 @@ def main():
         hits = [p[i, r.index("?" + v + "=") + 2] == ord(str(d)) for i, r in enumerate(rows) for v, d in golds[i]]
         out[f"lookup{nv}"] = float(np.mean(hits))
 
-    data = P._load("reason_train_v3")
+    data = P._load("reason_train_v4")
     L = P.SEQ_LEN + 1
     X = np.stack([data[s:s + L] for s in np.random.default_rng(0).integers(0, len(data) - L, 64)]).astype(np.int32)
     pred = np.array(mx.argmax(m(mx.array(X[:, :-1])), -1))

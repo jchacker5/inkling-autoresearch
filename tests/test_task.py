@@ -137,3 +137,29 @@ def test_order_and_query_blind_rules_score_zero_quads():
             # a rule that ignores the crossed hop gives the crossed prompts the original answers
             rule = [q[0][1], q[1][1], q[0][1], q[1][1]]
             assert not all(r == a for r, (_, a) in zip(rule, q))
+
+
+def test_training_stream_defeats_elimination():
+    """v3 asked every variable once, so "most frequent value not yet answered" (question-blind) scored well above
+    the plurality prior. With replacement (v4) elimination must give no gain over always guessing the plurality."""
+    import collections
+    data = P._reasoning_stream(seed=2, nbytes=200_000).tobytes().decode()
+    elim = plur = n = 0
+    for line in data.split("\n")[:-1]:
+        stmts, queries = line.split(";?", 1)
+        look = resolve(stmts)
+        names = [s.split("=")[0] for s in stmts.split(";")]
+        vals = collections.Counter(str(look(v)[0]) for v in names)
+        top = vals.most_common(1)[0][0]
+        left = collections.Counter(vals)
+        for q in ("?" + queries).split("?")[2:]:        # later questions only
+            v, a = q.split("=")
+            if left:
+                elim += left.most_common(1)[0][0] == a
+            plur += top == a
+            n += 1
+            left[a] -= 1
+            if left[a] <= 0:
+                del left[a]
+    assert n > 1000
+    assert elim / n <= plur / n + 0.02
