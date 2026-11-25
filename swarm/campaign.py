@@ -108,14 +108,15 @@ def refresh():
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
-def hold():
-    """While campaign/HOLD exists, wait (and keep picking up new code): lets a short experiment queue use the GPU
-    between campaign stages without competing with a wall-clock training budget."""
-    if (STATE / "HOLD").exists():
-        log("HOLD present: waiting")
-        while (STATE / "HOLD").exists():
+def hold(name="HOLD"):
+    """While campaign/<name> exists, wait (and keep picking up new code): lets a short experiment queue use the GPU
+    between campaign stages without competing with a wall-clock training budget. HOLD is checked before each
+    control, HOLD_SWARM before the swarm."""
+    if (STATE / name).exists():
+        log(f"{name} present: waiting")
+        while (STATE / name).exists():
             time.sleep(60)
-        log("HOLD released")
+        log(f"{name} released")
         refresh()
 
 
@@ -274,6 +275,7 @@ def main():
         log("reasoning gate failed: stopping before the swarm")
         return
     refresh()
+    hold("HOLD_SWARM")
     if not done("swarm"):
         if subprocess.run(["pgrep", "-f", "swarm/launch.sh"], capture_output=True).returncode == 0:
             log("swarm already running (campaign restarted); waiting for it")
