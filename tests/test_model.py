@@ -165,7 +165,8 @@ def test_answer_mask_marks_only_answer_digits_after_a_newline():
     tgt = row[1:]
     hits = [i for i in range(len(tgt)) if m[0, i]]
     assert [chr(tgt[i]) for i in hits] == ["3", "3", "7"]     # "?q=5" precedes the first newline: excluded
-    assert not m[8:].any()                                   # text rows (>= mix) never weighted
+    mix = round(train.REASONING_MIX * 32 / 32)
+    assert m[mix - 1].any() and not m[mix:].any()            # text rows (>= mix) never weighted
 
 
 def test_first_answer_mask_marks_each_lines_first_answer():

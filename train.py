@@ -56,10 +56,12 @@ KV_SHARE = False                   # core loops >1 attend with loop-1 K/V (KV ca
 EXIT_TAU = 0.0                     # eval only: >0 freezes a token once its loop-to-loop change falls below tau
 EXIT_METRIC = "kl"                 # "kl": KL(new || previous readout through coda+head); "state": relative L2 change
 LOOP_CONSIST = 0.0                 # train: weight of soft CE from final-loop readout to one random earlier loop
-CANON = 0                          # >0: Canon layers (Allen-Zhu, Physics of LMs 4.1): a residual causal depthwise
+CANON = 4                          # >0: Canon layers (Allen-Zhu, Physics of LMs 4.1): a residual causal depthwise
                                    # conv of this kernel size on each block's attention and MLP inputs. Zero-init,
                                    # so warm starts begin as a no-op. Gives every position its neighbours, so an
                                    # induction match on a 2-byte key ("r=") needs no previous-token head.
+                                   # Default since Nov 24: from scratch on pure 8-key lookup, retrieval forms by step
+                                   # 1000 with it (.998) and not by step 2500 without (.30) (results/sanity-*.txt).
 SLEEP = 0                          # >0: sleep window W (Lee et al. 2026, "Sample-Efficient In-Context Adaptation via
                                    # Sleep"). Predictions come from a one-pass "wake" stream (prelude, core once, coda)
                                    # that attends to the context of earlier W-byte windows as refined by the full
@@ -69,8 +71,8 @@ DREAM = 0.0                        # >0 (needs SLEEP): consolidation. Soft CE fr
                                    # prediction (stop-gradient) into the wake prediction, so the fast path absorbs
                                    # what the loops compute; the sleep readout also gets its CE at this weight.
 CHUNK = 1                          # >1: core runs on K-byte chunks (changes the architecture; new base needed)
-ANSWER_W = 3.0                     # loss weight on reasoning answer digits ("?v=D"; unweighted they are ~2.4% of loss)
-FIRST_ANSWER_W = 30.0              # weight on each line's FIRST answer: a chain end, the only deep, question-dependent
+ANSWER_W = 10.0                    # loss weight on reasoning answer digits ("?v=D"; unweighted they are ~2.4% of loss)
+FIRST_ANSWER_W = 10.0              # weight on each line's FIRST answer: a chain end, the only deep, question-dependent
                                    # query (later answers can copy earlier ones). The reported ce stays unweighted.
 
 INIT_FROM_BASE = True              # continue from the shared base checkpoint (see pretrain_base.py)
