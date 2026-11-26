@@ -90,6 +90,7 @@ RECIPE = "R"
 R_LR = 1e-5                        # tensors loaded from the base (below base-v2 final LR ~5e-5)
 R_LR_NEW = 1e-3                    # new matrices (absent from the base checkpoint)
 R_LR_NEW_VEC = 1e-2                # new 1-D tensors: gates, scales, biases
+R_LR_CORE = 1e-4                   # base tensors of the shared looped core (None: same as R_LR)
 R_WARMUP, R_DECAY_FRAC = 10, 1.0
 DTYPE = mx.float32                 # activation dtype; params are fp32 (bf16 only helps if params are cast too)
 
@@ -462,6 +463,7 @@ def param_groups(new_keys):
     new_keys = set(new_keys)
     return [("new_vec", R_LR_NEW_VEC, 0.0, lambda p, a: p in new_keys and a.ndim <= 1),
             ("new_mat", R_LR_NEW, 0.0, lambda p, a: p in new_keys),
+            *([("core", R_LR_CORE, WEIGHT_DECAY, lambda p, a: p.startswith("core."))] if R_LR_CORE else []),
             ("base", R_LR, WEIGHT_DECAY, None)]
 
 

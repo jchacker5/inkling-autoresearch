@@ -119,7 +119,7 @@ def test_recipe_r_assigns_parameter_groups(tmp_path):
     train, base = build()
     path = str(tmp_path / "base.safetensors")
     base.save_weights(path)
-    train, m = build(LOOP_EMBED=True, HISTORY="gated")
+    train, m = build(LOOP_EMBED=True, HISTORY="gated", R_LR_CORE=None)
     new = train.load_base(m, path)
     assert new == {"loop_proj.weight", "hist_scale", "hist_gate.weight", "hist_gate.bias"}
     opt, groups, (vec, mat, old) = _groups_of(m, new)
@@ -128,6 +128,14 @@ def test_recipe_r_assigns_parameter_groups(tmp_path):
     assert old == set(k for k, _ in tree_flatten(m.trainable_parameters())) - new
     assert [lr for _, lr in groups] == [train.R_LR_NEW_VEC, train.R_LR_NEW, train.R_LR]
     assert [o.weight_decay for o, _ in groups] == [0.0, 0.0, train.WEIGHT_DECAY]
+
+
+def test_recipe_r_core_group():
+    train, m = build(R_LR_CORE=1e-4)
+    opt, groups, (vec, mat, core, old) = _groups_of(m, set())
+    assert core and all(k.startswith("core.") for k in core)
+    assert not any(k.startswith("core.") for k in old)
+    assert [lr for _, lr in groups][2:] == [1e-4, train.R_LR]
 
 
 def test_lr_schedules():
