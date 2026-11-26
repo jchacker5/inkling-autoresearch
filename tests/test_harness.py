@@ -134,9 +134,10 @@ def test_lr_schedules():
     import train
     importlib.reload(train)
     s = train.lr_scale
-    assert s("R", 0, 0.0) == pytest.approx(0.1)
-    assert s("R", 9, 0.0) == 1.0 and s("R", 500, 0.5) == 1.0 and s("R", 500, 0.75) == 1.0
-    assert s("R", 500, 0.875) == pytest.approx(0.5)
+    w, d = train.R_WARMUP, train.R_DECAY_FRAC
+    assert s("R", 0, 0.0) == pytest.approx(1 / w)
+    assert s("R", w - 1, 0.0) == 1.0 and s("R", 500, 0.5 * (1 - d)) == 1.0 and s("R", 500, 1 - d) == 1.0
+    assert s("R", 500, 1 - d / 2) == pytest.approx(0.5)
     assert s("R", 500, 1.0) == 0.0 and s("R", 500, 1.2) == 0.0
     # legacy is the old formula exactly
     for step, prog in ((0, 0.0), (49, 0.1), (99, 0.0), (300, 0.5), (900, 1.0)):
