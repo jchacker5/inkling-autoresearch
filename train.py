@@ -42,6 +42,7 @@ N_HEADS = 6
 MLP_MULT = 4
 PRELUDE, CORE, CODA = 1, 2, 1     # unique blocks; effective depth = PRELUDE + CORE*LOOPS + CODA
 LOOPS = 4                          # recurrent iterations at train time (and default at eval)
+LOOP_CHOICES = (4, 4, 4, 8)        # if set: sample the train loop count uniformly from these per step
 RANDOM_LOOPS = False               # sample loops in [1, 2*LOOPS-1] per step (mean LOOPS) for test-time scaling
 BPTT_LOOPS = None                  # backprop only through the last k loops (None = full)
 INJECTION = "add"                  # "add": re-inject prelude output each loop; "none"
@@ -87,10 +88,12 @@ FINAL_LR_FRAC = 0.05
 #        R_WARMUP steps of warm-up, constant, then linear decay to 0 over the last R_DECAY_FRAC of the budget.
 #   "legacy": one group at LR with WARMUP_STEPS warm-up and cosine decay to FINAL_LR_FRAC (re-warms the base).
 RECIPE = "R"
-R_LR = 1e-4                        # tensors loaded from the base (4x base-v2's final LR)
+R_LR = 1e-4                        # tensors loaded from the base (below base-v2 final LR ~5e-5)
 R_LR_NEW = 1e-3                    # new matrices (absent from the base checkpoint)
 R_LR_NEW_VEC = 1e-2                # new 1-D tensors: gates, scales, biases
-R_WARMUP, R_DECAY_FRAC = 10, 0.25
+R_LR_CORE = None                   # base tensors of the shared looped core (None: same as R_LR)
+R_WARMUP, R_DECAY_FRAC = 10, 1.0
+R_INTERP = 0.5                     # <1: after training, base tensors become base + R_INTERP*(trained - base) (WiSE-FT)
 DTYPE = mx.float32                 # activation dtype; params are fp32 (bf16 only helps if params are cast too)
 
 
@@ -462,6 +465,7 @@ def param_groups(new_keys):
     new_keys = set(new_keys)
     return [("new_vec", R_LR_NEW_VEC, 0.0, lambda p, a: p in new_keys and a.ndim <= 1),
             ("new_mat", R_LR_NEW, 0.0, lambda p, a: p in new_keys),
+            *([("core", R_LR_CORE, WEIGHT_DECAY, lambda p, a: p.startswith("core."))] if R_LR_CORE else []),
             ("base", R_LR, WEIGHT_DECAY, None)]
 
 
@@ -514,6 +518,8 @@ def train(model, budget, lr_peak, seed=SEED, log_every=50, on_tick=None, stop_af
             o.learning_rate = lr0 * s
         lr = groups[-1][1] * s             # logged: the base / single group
         k = int(rng.integers(1, 2 * LOOPS)) if RANDOM_LOOPS else LOOPS
+        if LOOP_CHOICES:
+            k = int(LOOP_CHOICES[int(rng.integers(0, len(LOOP_CHOICES)))])
         c = int(rng.integers(0, k - 1)) if (LOOP_CONSIST > 0 and k > 1) else -1
         fresh = (k, c) not in steps_fns
         loss, ce = step_fn(k, c)(mx.array(next(data)))
@@ -545,7 +551,12 @@ def main():
             raise SystemExit(f"FAIL: {BASE_CKPT} missing; run `uv run pretrain_base.py` once (or set INIT_FROM_BASE=False)")
         new_keys = load_base(model, BASE_CKPT)
     recipe = RECIPE if INIT_FROM_BASE else "legacy"    # recipe R is defined for warm starts only
+    base0 = {k: mx.array(v) for k, v in tree_flatten(model.parameters()) if k not in new_keys}
     info = train(model, TIME_BUDGET, LR, recipe=recipe, new_keys=new_keys)
+    if INIT_FROM_BASE and R_INTERP < 1:
+        model.load_weights([(k, base0[k] + R_INTERP * (v - base0[k]))
+                            for k, v in tree_flatten(model.parameters()) if k in base0], strict=False)
+        mx.eval(model.parameters())
     info["init_from_base"] = INIT_FROM_BASE
     info["base"] = BASE_NAME if INIT_FROM_BASE else "scratch"
     evaluate(model, info)
