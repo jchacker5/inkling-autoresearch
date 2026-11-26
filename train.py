@@ -87,7 +87,7 @@ FINAL_LR_FRAC = 0.05
 #        R_WARMUP steps of warm-up, constant, then linear decay to 0 over the last R_DECAY_FRAC of the budget.
 #   "legacy": one group at LR with WARMUP_STEPS warm-up and cosine decay to FINAL_LR_FRAC (re-warms the base).
 RECIPE = "R"
-R_LR = 1e-5                        # tensors loaded from the base (below base-v2 final LR ~5e-5)
+R_LR = 3e-6                        # tensors loaded from the base (below base-v2 final LR ~5e-5)
 R_LR_NEW = 1e-3                    # new matrices (absent from the base checkpoint)
 R_LR_NEW_VEC = 1e-2                # new 1-D tensors: gates, scales, biases
 R_WARMUP, R_DECAY_FRAC = 10, 0.25
