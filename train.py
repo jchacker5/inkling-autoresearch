@@ -87,11 +87,12 @@ FINAL_LR_FRAC = 0.05
 #        R_WARMUP steps of warm-up, constant, then linear decay to 0 over the last R_DECAY_FRAC of the budget.
 #   "legacy": one group at LR with WARMUP_STEPS warm-up and cosine decay to FINAL_LR_FRAC (re-warms the base).
 RECIPE = "R"
-R_LR = 1e-5                        # tensors loaded from the base (below base-v2 final LR ~5e-5)
+R_LR = 1e-4                        # tensors loaded from the base (below base-v2 final LR ~5e-5)
 R_LR_NEW = 1e-3                    # new matrices (absent from the base checkpoint)
 R_LR_NEW_VEC = 1e-2                # new 1-D tensors: gates, scales, biases
 R_LR_CORE = None                   # base tensors of the shared looped core (None: same as R_LR)
 R_WARMUP, R_DECAY_FRAC = 10, 1.0
+R_INTERP = 0.5                     # <1: after training, base tensors become base + R_INTERP*(trained - base) (WiSE-FT)
 DTYPE = mx.float32                 # activation dtype; params are fp32 (bf16 only helps if params are cast too)
 
 
@@ -547,7 +548,12 @@ def main():
             raise SystemExit(f"FAIL: {BASE_CKPT} missing; run `uv run pretrain_base.py` once (or set INIT_FROM_BASE=False)")
         new_keys = load_base(model, BASE_CKPT)
     recipe = RECIPE if INIT_FROM_BASE else "legacy"    # recipe R is defined for warm starts only
+    base0 = {k: mx.array(v) for k, v in tree_flatten(model.parameters()) if k not in new_keys}
     info = train(model, TIME_BUDGET, LR, recipe=recipe, new_keys=new_keys)
+    if INIT_FROM_BASE and R_INTERP < 1:
+        model.load_weights([(k, base0[k] + R_INTERP * (v - base0[k]))
+                            for k, v in tree_flatten(model.parameters()) if k in base0], strict=False)
+        mx.eval(model.parameters())
     info["init_from_base"] = INIT_FROM_BASE
     info["base"] = BASE_NAME if INIT_FROM_BASE else "scratch"
     evaluate(model, info)
