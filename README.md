@@ -44,10 +44,12 @@ With 1 loop instead of 4, direct lookup never formed in 7,500 steps when the con
 statements (`results/multihop-*.txt`).
 
 **3. The 5-minute warm-start swarm found only small text gains.** 4 lanes ran on the `base-v4` checkpoint, and
-each lane's best run was rerun on 6 holdout seeds (Welch test with Holm correction, `results/confirm.tsv`). Two were
-promoted on `val_bpb`: the recipe lane (decay over the whole budget plus WiSE-FT weight interpolation,
+each lane's best run was rerun with 6 fresh training seeds (Welch test with Holm correction, `results/confirm.tsv`).
+The reasoning examples changed, but the text score reused the same validation shard and windows used during screening.
+Two text candidates passed the historical gate on that shared validation corpus: the recipe lane (decay over the whole budget plus WiSE-FT weight interpolation,
 1.4698 to 1.4666) and the depth lane (1.4671). The binding and exit lanes changed nothing. Reasoning could not be
-screened because every `base-v4` baseline seed scores 0 pairs.
+screened because every `base-v4` baseline seed scores 0 pairs. The text changes are exploratory until reproduced on an
+untouched text corpus. The checked-in summary alone cannot certify the six original seed identities; keep the per-seed ledger.
 
 **What changed in the task along the way.** The first four reasoning tasks each had a shortcut that a model
 can use without reading the question. In v1, copying the prompt's first digit worked. In v2, structure found

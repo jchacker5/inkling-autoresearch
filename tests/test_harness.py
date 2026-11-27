@@ -287,10 +287,10 @@ def test_confirm_table_promotes_only_a_real_gain(tmp_path):
             _row(lane="null", verdict="candidate", commit="n1", t_primary=1.1),
             _row(lane="none", verdict="discard", commit="x")]
     base_k = [0.10, 0.12, 0.08, 0.11, 0.09, 0.10]
-    rows += [_row(lane=C.BASELINE_LANE, k=k, eval_seed=hs, verdict="holdout") for k in base_k]
-    rows += [_row(lane="good-confirm", k=k + 0.08, eval_seed=hs, commit="g1", verdict="holdout") for k in base_k]
+    rows += [_row(lane=C.BASELINE_LANE, k=k, eval_seed=hs, seed=seed, verdict="holdout") for seed, k in zip(C.CONFIRM_SEEDS, base_k, strict=True)]
+    rows += [_row(lane="good-confirm", k=k + 0.08, eval_seed=hs, seed=seed, commit="g1", verdict="holdout") for seed, k in zip(C.CONFIRM_SEEDS, base_k, strict=True)]
     rows += [_row(lane="good-confirm", k=0.0, eval_seed=hs, commit="g0", verdict="holdout")]   # other commit: ignored
-    rows += [_row(lane="null-confirm", k=k + 0.001, eval_seed=hs, commit="n1", verdict="holdout") for k in base_k]
+    rows += [_row(lane="null-confirm", k=k + 0.001, eval_seed=hs, seed=seed, commit="n1", verdict="holdout") for seed, k in zip(C.CONFIRM_SEEDS, base_k, strict=True)]
     table = C.confirm_table(rows, ["good", "null", "none"], P.HOLDOUT_EVAL_SEED)
     by = {r["lane"]: r for r in table}
     assert set(by) == {"good", "null"}

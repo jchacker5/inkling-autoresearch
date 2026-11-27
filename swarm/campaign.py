@@ -153,11 +153,72 @@ def train_ckpt(name, hours, stop_hours=None, overrides=(), extra=()):
 
 
 def ledger():
-    p = ROOT / "results" / "ledger.tsv"
+    p = Path(os.environ.get("INKLING_LEDGER", ROOT / "results" / "ledger.tsv")).resolve()
     if not p.exists():
         return []
     with open(p) as f:
         return list(csv.DictReader(f, delimiter="\t"))
+
+
+def pinned_confirmation_baseline(harness, base):
+    """A resumed run must keep the original baseline even if main advanced."""
+    path = STATE / "confirmation-baseline.json"
+    if not path.exists():
+        revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+        try:
+            with path.open("x") as f:
+                json.dump(dict(commit=revision, harness=harness, base=base), f)
+        except FileExistsError:
+            pass  # Another campaign pinned the baseline first.
+    record = json.loads(path.read_text())
+    if (record["harness"], record["base"]) != (harness, base):
+        raise RuntimeError("pinned confirmation harness or base differs; use a fresh campaign state")
+    return record["commit"]
+
+
+def confirm_seed(step, lane, seed, cwd, commit, harness, base, *, desc, checkout=False,
+                 primary="kappa_id", hypothesis=""):
+    """A marker is a convenience, not proof that the experiment succeeded."""
+    if not harness or not base:
+        raise RuntimeError(f"{step}: missing reference harness or base")
+    eval_seed = str(HOLDOUT_EVAL_SEED)
+    marker = STATE / f"{step}.done"
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()
+
+    short = git("rev-parse", "--short", "--verify", f"{commit}^{{commit}}")
+    expected = dict(lane=lane, commit=short, seed=str(seed), harness=harness, base=base,
+                    eval_seed=eval_seed, valid="True", verdict="holdout", dirty="False")
+
+    def receipts():
+        return [row for row in ledger() if all(row.get(k) == v for k, v in expected.items())]
+
+    prior = receipts()
+    if len(prior) > 1:
+        marker.unlink(missing_ok=True)
+        raise RuntimeError(f"{step}: duplicate valid receipts; reconcile the ledger without deleting evidence")
+    if prior:
+        if not marker.exists():
+            mark(step)
+        return
+    marker.unlink(missing_ok=True)
+    if git("diff", "HEAD", "--", "train.py"):
+        raise RuntimeError(f"{step}: uncommitted train.py; preserve it before resuming")
+    if checkout:
+        git("checkout", "--detach", "-q", commit)
+    if git("rev-parse", "--short", "HEAD") != short:
+        raise RuntimeError(f"{step}: wrong checkout; expected {short}")
+    wait_for_power()
+    ledger_file = Path(os.environ.get("INKLING_LEDGER", ROOT / "results" / "ledger.tsv")).resolve()
+    env = {"INKLING_EVAL_SEED": eval_seed, "INKLING_LEDGER": str(ledger_file),
+           "UV_PROJECT_ENVIRONMENT": str(ROOT / ".venv")}
+    rc = run(UV, "run", "swarm/run.py", "--lane", lane, "--seed", str(seed),
+             "--primary", primary, "--desc", desc, "--hypothesis", hypothesis, cwd=cwd, env=env)
+    if rc or len(receipts()) != 1:
+        raise RuntimeError(f"{step}: expected one valid receipt from this run (runner exit {rc})")
+    mark(step)
 
 
 def main():
@@ -291,7 +352,6 @@ def main():
     # 7. confirmation (program.md "Promotion"): each lane's best screening candidate gets fresh seeds scored on the
     #    HOLDOUT eval set, interleaved with the same number of fresh baseline seeds on the same set; then a one-sided
     #    Welch test per lane, Holm across lanes at alpha .05 -> results/confirm.tsv.
-    holdout = {"INKLING_EVAL_SEED": str(HOLDOUT_EVAL_SEED)}
     finalists = {}
     for lane in lanes:
         best = best_candidate(ledger(), lane)
@@ -299,29 +359,25 @@ def main():
             finalists[lane] = best
     if finalists:
         log("confirmation finalists: " + ", ".join(f"{k}@{v['commit']}" for k, v in finalists.items()))
-    for s in CONFIRM_SEEDS if finalists else ():
-        step = f"confirm-baseline-{s}"
-        if not done(step):
-            wait_for_power()
-            run(UV, "run", "swarm/run.py", "--lane", BASELINE_LANE, "--seed", str(s),
-                "--desc", f"holdout baseline seed {s}", "--hypothesis", "confirmation reference", env=holdout)
-            mark(step)
-        for lane, best in finalists.items():
-            step = f"confirm-{lane}-{best['commit']}-{s}"
-            if done(step):
-                continue
-            wt = ROOT / "lanes" / lane
-            # drop any unfinished experiment, then check out the candidate's commit
-            run("git", "checkout", "-q", "--", "train.py", cwd=wt, check=False)
-            run("git", "checkout", "-q", best["commit"], cwd=wt, check=False)
-            wait_for_power()
-            run(UV, "run", "swarm/run.py", "--lane", f"{lane}-confirm", "--seed", str(s),
-                "--primary", best.get("primary") or "kappa_id",
-                "--desc", f"confirm {lane} best {best['commit']} seed {s}", "--hypothesis", best["desc"], cwd=wt,
-                env={"UV_PROJECT_ENVIRONMENT": str(ROOT / ".venv"), **holdout})
-            mark(step)
     if finalists:
-        table = confirm_table(ledger(), list(finalists), HOLDOUT_EVAL_SEED)
+        contexts = {(best.get("harness"), best.get("base")) for best in finalists.values()}
+        if len(contexts) != 1:
+            raise RuntimeError("confirmation finalists do not share a harness and base")
+        harness, base = next(iter(contexts))
+        baseline = pinned_confirmation_baseline(harness, base)
+        baseline_short = subprocess.run(["git", "rev-parse", "--short", "--verify", baseline],
+                                        cwd=ROOT, check=True, capture_output=True, text=True).stdout.strip()
+        for seed in CONFIRM_SEEDS:
+            confirm_seed(f"confirm-baseline-{seed}", BASELINE_LANE, seed, ROOT, baseline, harness, base,
+                         desc=f"holdout baseline seed {seed}", hypothesis="confirmation reference")
+            for lane, best in finalists.items():
+                commit = best["commit"]
+                confirm_seed(f"confirm-{lane}-{commit}-{seed}", f"{lane}-confirm", seed,
+                             ROOT / "lanes" / lane, commit, harness, base, checkout=True,
+                             primary=best.get("primary") or "kappa_id", hypothesis=best["desc"],
+                             desc=f"confirm {lane} best {commit} seed {seed}")
+    if finalists:
+        table = confirm_table(ledger(), list(finalists), HOLDOUT_EVAL_SEED, baseline_commit=baseline_short)
         write_tsv(table, ROOT / "results" / "confirm.tsv")
         for r in table:
             log(f"confirm {r['lane']}: p={r['p_one_sided']} holm_alpha={r['holm_alpha']} promoted={r['promoted']}")
