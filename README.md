@@ -11,21 +11,55 @@ never stops. It targets looped transformers on Apple Silicon with [MLX](https://
 and adds a swarm layer so several AI agents can work different hypotheses at once while sharing one GPU
 fairly. "Inkling" is the working name of the model family.
 
-## Status (2026-11-23)
+> "Inkling" is this repo's working name for a small model family. It has no connection to Thinking Machines Lab
+> or its models.
 
-- The harness, model switches, swarm runner and tests are in place.
-- The shared base checkpoint is still training (6 hours planned on an M4, 32 GB).
-- **There are no architecture results yet.** Nothing here shows that any modification beats the baseline.
-- The paper is being written in [`paper/`](paper/): the setup and calibration sections are drafted, and the
-  results sections will be filled from the overnight campaign (`swarm/campaign.py`).
+## Status (2026-11-27)
 
-**The first two reasoning tasks had shortcuts, and the first 6-hour base learned one.** In v1 the chain's
-start was the first statement about half the time, so copying the prompt's first digit scored .48-.57 at every
-hop; the base's .44-.54 was that rule. In v2 the queried chain was the only long single-child path, so structure
-alone found it. Task v3 (`prepare.py`) puts two chains of equal length in each problem and asks both ends as
-twin prompts. A pair counts only if both answers are right, so a model that ignores the question scores 0 and
-structure plus a coin flip scores .25 (`reason_floor_id/ood`). Models trained on v1 or v2 data are not
-comparable with v3 results.
+The harness, model switches, swarm runner and tests (106, CPU only) are in place, and the first full campaign
+has run on one M4 with 32 GB. The results so far are mixed, and the main one is negative for looping.
+
+**1. At matched parameters and wall clock, the non-looped model wins.** Each row is trained from scratch for 2 hours on
+task-v4 data, with 7.3M unique parameters (`swarm/campaign.py`, `results/eval-*-2h.json`):
+
+| model | steps | `kappa_id` | `kappa_ood` | `val_bpb` |
+|---|---|---|---|---|
+| non-looped, 4 layers (`LOOPS=1`) | 11,300 | **.73** | **.21** | **1.642** |
+| chunked looped core (`CHUNK=4`) | 11,539 | .31 | -.05 | 1.723 |
+| looped, 4 loops | 4,765 | 0 (floor) | 0 | 1.713 |
+| looped, 4 loops, no answer weighting | 4,546 | 0 | 0 | 1.712 |
+
+A looped step costs about 2.5 times a non-looped one, so in the same time the looped model saw 2.4 times fewer
+tokens and had not yet learned to retrieve. The comparison is therefore matched on compute, not on steps. The
+looping literature makes the matched-step comparison, and a looped run at 11,300 steps with the same per-step LR
+schedule is in progress.
+
+**2. Multi-hop composition appears suddenly, and only after long training.** In a from-scratch chain task with
+equal-length chains (`swarm/sanity_lookup.py --hops 1 --nv 8`, so a model that ignores the question scores .25):
+
+| step | direct lookup (hop 0) | one-step chain (hop 1) |
+|---|---|---|
+| 1,500 | 1.00 | ~.30 |
+| 3,750-6,000 | 1.00 | .51-.59 |
+| 6,250-9,750 | 1.00 | .75-.90 |
+
+With 1 loop instead of 4, direct lookup never formed in 7,500 steps when the context also held pointer
+statements (`results/multihop-*.txt`).
+
+**3. The 5-minute warm-start swarm found only small text gains.** 4 lanes ran on the `base-v4` checkpoint, and
+each lane's best run was rerun on 6 holdout seeds (Welch test with Holm correction, `results/confirm.tsv`). Two were
+promoted on `val_bpb`: the recipe lane (decay over the whole budget plus WiSE-FT weight interpolation,
+1.4698 to 1.4666) and the depth lane (1.4671). The binding and exit lanes changed nothing. Reasoning could not be
+screened because every `base-v4` baseline seed scores 0 pairs.
+
+**What changed in the task along the way.** The first four reasoning tasks each had a shortcut that a model
+can use without reading the question. In v1, copying the prompt's first digit worked. In v2, structure found
+the queried chain. In v3, each variable was asked about once, so elimination worked. In random chain forests,
+the most common value worked. Task v4 (`prepare.py`) asks twin questions about equal-length chains, scores a pair
+only if both answers are right, and draws later training questions with replacement. `tests/test_task.py` checks the
+question-blind floors and the elimination shortcut. Models trained on earlier task versions are not comparable with v4 results.
+
+The paper draft is in [`paper/`](paper/).
 
 ## How it works
 
@@ -75,6 +109,21 @@ uv run swarm/run.py --lane baseline --desc baseline # 5 min of training + ~1 min
 uv run swarm/status.py
 ```
 
+### Reproducing the Status tables
+
+```sh
+uv run pretrain_base.py --name looped --hours 6 --stop-hours 2               # each control: 6 h schedule, stopped at 2 h
+uv run pretrain_base.py --name control-4L --hours 6 --stop-hours 2 --set LOOPS=1
+uv run pretrain_base.py --name chunk4 --hours 6 --stop-hours 2 --set CHUNK=4
+uv run swarm/eval_ckpt.py --name looped-2h                                   # writes results/eval-<name>.json
+uv run swarm/eval_ckpt.py --name control-4L-2h --set LOOPS=1 --no-sweep
+uv run swarm/sanity_lookup.py --minutes 150 --hops 1 --nv 8                  # the chain table (4 loops)
+uv run swarm/campaign.py                                                     # everything, including the swarm
+```
+
+Seeds are fixed in `train.py` and `prepare.py`, but wall-clock budgets make step counts depend on the machine.
+Checkpoints are not in the repo; rebuilding the two controls takes about 4 hours on an M4.
+
 `INKLING_SMOKE=1 uv run train.py` runs a 20-second smoke test of the full pipeline. Smoke results are
 marked invalid and never count.
 
@@ -122,6 +171,10 @@ dense kernels, so mean loops is an analytical compute measure for now).
 | `LOOP_CONSIST` | self-distillation: a random earlier loop learns to predict the final loop's output, so early exits lose less | yes at 0 (off); adds no parameters |
 | `CHUNK` | run the looped core over K-byte chunks (hourglass, after CALM arXiv 2510.27688): core compute and core KV cache drop by K; the byte-level coda keeps bits-per-byte exact | no, new architecture; needs its own base |
 | `RANDOM_LOOPS`, `BPTT_LOOPS` | Huginn-style training for test-time scaling; truncated backprop through loops | n/a, training only |
+| `CANON=K` | Canon layers (Allen-Zhu, Physics of LMs 4.1): a causal depthwise conv over the last K positions on each block's attention and MLP inputs. On by default (K=4); it makes in-context lookup form within ~1,000 steps | yes (zero-init) |
+| `SLEEP=W`, `DREAM` | after Lee et al., in-context adaptation via sleep: a one-pass wake stream reads the looped sleep stream's keys and values for earlier W-byte windows; `DREAM` distils sleep logits into wake logits | no, changes the computation; not yet evaluated |
+| `LOOP_CHOICES` | sample the training loop count per step from a tuple, e.g. `(4,)*7+(8,)`; trades default-loop bpb for 8-loop bpb | n/a, training only (off by default) |
+| `R_INTERP` | warm starts only: after training, interpolate base tensors back toward the base (WiSE-FT); 0.5 by default after holdout confirmation | n/a, warm starts only |
 
 These are first-pass implementations written from short descriptions of the methods, not reproductions
 of any paper. `tests/test_model.py` checks that every switch trains, stays causal, and (where claimed)
@@ -129,16 +182,19 @@ leaves a warm-started model unchanged at init.
 
 ## Open problems (good places to contribute)
 
-1. **A non-looped control** with the same unique parameter count and its own base checkpoint. Needed
-   before any "loops help" claim.
-2. **Real token skipping for halting**, so halting saves wall-clock time and not just analytical FLOPs.
-3. **Energy measurement** on Apple Silicon (for example by sampling `powermetrics`) for the
-   per-joule half of "intelligence per gigabyte".
-4. **Parallel recurrence (LoopFold-style)**, phase 2 in `program.md`: predict later loop states, run
-   them in parallel and correct them, measured in real MLX wall clock.
-5. **Hybrid recurrent cores** (for example mLSTM or DeltaNet layers inside the loop).
-6. **Seed noise**: `results/noise.md` reports the variance of the 6 baseline seeds and the screening bars
-   it implies.
+Each has a GitHub issue with details.
+
+1. **Looping at matched steps.** The matched-compute control favours the non-looped model (Status 1). Does looping
+   win at matched steps and tokens, and at what step does the looped model learn retrieval?
+2. **A multi-hop curriculum.** Composition emerges suddenly and late (Status 2). Would training on one-step chains
+   first, then deeper ones, bring it forward?
+3. **Sleep and dream on task v4.** The switches are implemented and tested but have not been measured.
+4. **Throughput.** Training runs at about 12k bytes/s with the GPU about 15% busy. bf16 parameters and larger batches
+   would raise how much every experiment can learn.
+5. **Why 1 loop fails lookup in the synthetic chain task but learns it on real data** (`control-4L` reaches
+   .96/.77/.51 pair accuracy at 2/4/6 hops).
+6. **Real token skipping for halting**, so halting saves wall-clock time and not just analytical FLOPs.
+7. **Energy measurement** on Apple Silicon (for example by sampling `powermetrics`).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to propose changes and how to report results.
 
