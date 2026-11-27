@@ -42,6 +42,7 @@ N_HEADS = 6
 MLP_MULT = 4
 PRELUDE, CORE, CODA = 1, 2, 1     # unique blocks; effective depth = PRELUDE + CORE*LOOPS + CODA
 LOOPS = 4                          # recurrent iterations at train time (and default at eval)
+LOOP_CHOICES = (4, 4, 4, 4, 4, 4, 4, 8)       # if set: sample the train loop count uniformly from these per step
 RANDOM_LOOPS = False               # sample loops in [1, 2*LOOPS-1] per step (mean LOOPS) for test-time scaling
 BPTT_LOOPS = None                  # backprop only through the last k loops (None = full)
 INJECTION = "add"                  # "add": re-inject prelude output each loop; "none"
@@ -517,6 +518,8 @@ def train(model, budget, lr_peak, seed=SEED, log_every=50, on_tick=None, stop_af
             o.learning_rate = lr0 * s
         lr = groups[-1][1] * s             # logged: the base / single group
         k = int(rng.integers(1, 2 * LOOPS)) if RANDOM_LOOPS else LOOPS
+        if LOOP_CHOICES:
+            k = int(LOOP_CHOICES[int(rng.integers(0, len(LOOP_CHOICES)))])
         c = int(rng.integers(0, k - 1)) if (LOOP_CONSIST > 0 and k > 1) else -1
         fresh = (k, c) not in steps_fns
         loss, ce = step_fn(k, c)(mx.array(next(data)))
