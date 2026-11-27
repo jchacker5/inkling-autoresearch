@@ -17,3 +17,6 @@ dev = [
 paper = [
     "matplotlib>=3.11.2",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

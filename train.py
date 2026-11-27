@@ -42,7 +42,7 @@ N_HEADS = 6
 MLP_MULT = 4
 PRELUDE, CORE, CODA = 1, 2, 1     # unique blocks; effective depth = PRELUDE + CORE*LOOPS + CODA
 LOOPS = 4                          # recurrent iterations at train time (and default at eval)
-LOOP_CHOICES = (4, 4, 4, 4, 4, 4, 4, 8)       # if set: sample the train loop count uniformly from these per step
+LOOP_CHOICES = None                 # e.g. (4,)*7+(8,): sample the train loop count per step (depth lane; helps 8-loop bpb)
 RANDOM_LOOPS = False               # sample loops in [1, 2*LOOPS-1] per step (mean LOOPS) for test-time scaling
 BPTT_LOOPS = None                  # backprop only through the last k loops (None = full)
 INJECTION = "add"                  # "add": re-inject prelude output each loop; "none"

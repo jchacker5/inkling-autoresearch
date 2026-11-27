@@ -7,3 +7,4 @@ lanes/
 results/ledger.tsv
 results/*.log
 .pytest_cache/
+.claude/
