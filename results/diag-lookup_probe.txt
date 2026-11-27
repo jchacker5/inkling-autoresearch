@@ -1,0 +1,1 @@
+diag-lookup induction=0.424 lookup4=0.398 lookup10=0.237 lookup20=0.130 train_first0=0.056 train_first1=0.000 train_first2=0.000 train_first3=0.200 train_first4=0.246 train_later0=0.171 train_later1=0.216 train_later2=0.306 train_later3=0.398 train_later4=0.374

@@ -1,0 +1,1 @@
+diag-canon-sleep induction=0.453 lookup4=0.352 lookup10=0.223 lookup20=0.138 train_first0=0.000 train_first1=0.000 train_first2=0.059 train_first3=0.050 train_first4=0.154 train_later0=0.172 train_later1=0.195 train_later2=0.271 train_later3=0.351 train_later4=0.345

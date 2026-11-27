@@ -1,0 +1,9 @@
+step     0 t     0s loss 5.719 answer_acc 0.003 h0=0.000 h1=0.005 h2=0.005
+step   250 t    86s loss 1.580 answer_acc 0.207 h0=0.167 h1=0.229 h2=0.200
+step   500 t   173s loss 1.531 answer_acc 0.203 h0=0.197 h1=0.210 h2=0.210
+step   750 t   260s loss 1.525 answer_acc 0.199 h0=0.192 h1=0.229 h2=0.185
+step  1000 t   346s loss 1.516 answer_acc 0.197 h0=0.172 h1=0.210 h2=0.224
+step  1250 t   430s loss 1.508 answer_acc 0.169 h0=0.192 h1=0.196 h2=0.166
+step  1500 t   527s loss 1.476 answer_acc 0.203 h0=0.182 h1=0.210 h2=0.215
+step  1750 t   718s loss 1.472 answer_acc 0.211 h0=0.227 h1=0.178 h2=0.239
+step  2000 t   810s loss 1.463 answer_acc 0.203 h0=0.232 h1=0.201 h2=0.210

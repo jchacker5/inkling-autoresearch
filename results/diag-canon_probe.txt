@@ -1,0 +1,1 @@
+diag-canon induction=0.458 lookup4=0.383 lookup10=0.236 lookup20=0.134 train_first0=0.056 train_first1=0.000 train_first2=0.000 train_first3=0.050 train_first4=0.200 train_later0=0.167 train_later1=0.216 train_later2=0.286 train_later3=0.368 train_later4=0.380

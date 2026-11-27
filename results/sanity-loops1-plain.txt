@@ -1,0 +1,11 @@
+step     0 t     0s loss 5.672 answer_acc 0.000
+step   250 t    61s loss 1.497 answer_acc 0.251
+step   500 t   128s loss 1.455 answer_acc 0.276
+step   750 t   199s loss 1.430 answer_acc 0.265
+step  1000 t   267s loss 1.439 answer_acc 0.288
+step  1250 t   333s loss 1.444 answer_acc 0.278
+step  1500 t   399s loss 1.427 answer_acc 0.289
+step  1750 t   466s loss 1.411 answer_acc 0.295
+step  2000 t   532s loss 1.404 answer_acc 0.287
+step  2250 t   598s loss 1.414 answer_acc 0.278
+step  2500 t   663s loss 1.410 answer_acc 0.298

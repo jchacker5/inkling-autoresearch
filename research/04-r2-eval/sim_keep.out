@@ -1,0 +1,26 @@
+## OLD rule, global null (60 experiments, 4 lanes); sigma_bpb .002; rho(id,ood) .5
+sigma_acc  P(>=1 promoted) excl.disc | incl.disc   E[keeps]
+  0.015     0.340                   0.467       2.47
+  0.025     0.375                   0.481       3.14
+  0.040     0.374                   0.483       3.33
+OLD rule power, true effect on reason_id of delta*sigma in lane 0's 5th idea (sigma_acc .025, excl. discovery):
+  delta 1: P(promoted) 0.070
+  delta 1.5: P(promoted) 0.136
+  delta 2: P(promoted) 0.242
+  delta 3: P(promoted) 0.521
+
+## NEW rule: global null and power (delta in sigma units of the primary metric)
+alpha_screen 0.05 n_c 4: P(false promotion) 0.043  E[keeps|null] 2.91  power d=1/1.5/2/3: 0.06/0.18/0.36/0.73  E[runs|null] 75
+alpha_screen 0.05 n_c 5: P(false promotion) 0.041  E[keeps|null] 2.92  power d=1/1.5/2/3: 0.08/0.22/0.41/0.75  E[runs|null] 76
+alpha_screen 0.05 n_c 6: P(false promotion) 0.042  E[keeps|null] 2.97  power d=1/1.5/2/3: 0.10/0.25/0.44/0.76  E[runs|null] 78
+alpha_screen 0.10 n_c 4: P(false promotion) 0.054  E[keeps|null] 5.88  power d=1/1.5/2/3: 0.09/0.25/0.46/0.83  E[runs|null] 79
+alpha_screen 0.10 n_c 5: P(false promotion) 0.046  E[keeps|null] 5.84  power d=1/1.5/2/3: 0.11/0.31/0.55/0.87  E[runs|null] 81
+alpha_screen 0.10 n_c 6: P(false promotion) 0.046  E[keeps|null] 5.96  power d=1/1.5/2/3: 0.14/0.35/0.60/0.87  E[runs|null] 83
+alpha_screen 0.20 n_c 4: P(false promotion) 0.052  E[keeps|null] 11.67  power d=1/1.5/2/3: 0.12/0.30/0.54/0.88  E[runs|null] 83
+alpha_screen 0.20 n_c 5: P(false promotion) 0.047  E[keeps|null] 11.79  power d=1/1.5/2/3: 0.15/0.38/0.66/0.93  E[runs|null] 86
+alpha_screen 0.20 n_c 6: P(false promotion) 0.043  E[keeps|null] 11.70  power d=1/1.5/2/3: 0.18/0.44/0.72/0.94  E[runs|null] 89
+
+single-run screen power vs pooled 6-seed baseline (P(keep) for one attempt):
+  alpha 0.05 delta 1: 0.200  alpha 0.05 delta 2: 0.482  alpha 0.05 delta 3: 0.770
+  alpha 0.10 delta 1: 0.333  alpha 0.10 delta 2: 0.657  alpha 0.10 delta 3: 0.894
+  alpha 0.20 delta 1: 0.520  alpha 0.20 delta 2: 0.825  alpha 0.20 delta 3: 0.966

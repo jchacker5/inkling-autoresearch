@@ -1,0 +1,37 @@
+## (a) query-blind 'bare path' rule: uniform over roots whose first m levels are single-child (m serial lookups, no question)
+hop  m=0    m=1    m=2    m=3    m=4    m=5    m=6   
+h0   0.106  0.000  0.000  0.000  0.000  0.000  0.000 
+h1   0.108  0.368  0.000  0.000  0.000  0.000  0.000 
+h2   0.111  0.388  0.794  0.000  0.000  0.000  0.000 
+h4   0.120  0.421  0.817  0.968  0.995  0.000  0.000 
+h6   0.132  0.460  0.833  0.967  0.995  0.999  1.000 
+h8   0.152  0.510  0.856  0.972  0.996  0.999  1.000 
+h10  0.178  0.552  0.870  0.974  0.995  1.000  1.000 
+official set:
+h2   0.111  0.390  0.782  0.000  0.000  0.000  0.000 
+h4   0.119  0.405  0.820  0.970  0.993  0.000  0.000 
+h6   0.134  0.470  0.848  0.977  0.994  0.998  1.000 
+h8   0.150  0.518  0.862  0.960  0.989  1.000  1.000 
+h10  0.177  0.566  0.872  0.981  0.999  1.000  1.000 
+
+## (b) decoy chain (two bare chains of h hops; ask one end at random), 20 vars where it fits, else 24
+hop  vars  first  last  1/R    1-child  path(m=h)  deepest  plurality
+h2   20    0.111  0.117 0.114  0.287    0.450      0.195    0.041
+h4   20    0.130  0.136 0.139  0.328    0.499      0.492    0.369
+h6   20    0.189  0.199 0.191  0.369    0.500      0.500    0.500
+h8   20    0.288  0.289 0.292  0.416    0.500      0.500    0.500
+h10  24    0.296  0.288 0.292  0.416    0.500      0.500    0.500
+
+## (c) training lines (hops 0-6, 20 queries each): true depth vs effective depth
+effective depth = pointer steps until a root statement OR a variable already answered earlier in the line
+depth:                 0      1      2      3      4      5      6
+true depth  frac:  0.443  0.293  0.151  0.068  0.024  0.014  0.007
+eff. depth  frac:  0.443  0.425  0.094  0.026  0.007  0.003  0.001
+first-query frac: 0.0219 0.0149 0.0076 0.0033 0.0012 0.0008 0.0003   (of all answers)
+answers whose digit already appeared as an earlier answer in the line: 0.557
+query-blind 'most common earlier answer' rule accuracy (queries 2..20): 0.210
+for true depth d >= 4, distribution of effective depth:
+  d=4: e0:0.00 e1:0.50 e2:0.16 e3:0.09 e4:0.26
+  d=5: e0:0.00 e1:0.50 e2:0.17 e3:0.08 e4:0.05 e5:0.21
+  d=6: e0:0.00 e1:0.50 e2:0.16 e3:0.09 e4:0.05 e5:0.04 e6:0.16
+mean training line length 161.0 bytes; answers/line 20 -> answer bytes 0.124 of reasoning bytes, 0.0311 of all training bytes; eval-format (first query = chain end at depth h) 0.00008 of all bytes

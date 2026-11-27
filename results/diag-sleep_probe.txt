@@ -1,0 +1,1 @@
+diag-sleep induction=0.446 lookup4=0.359 lookup10=0.209 lookup20=0.134 train_first0=0.000 train_first1=0.000 train_first2=0.059 train_first3=0.100 train_first4=0.092 train_later0=0.173 train_later1=0.199 train_later2=0.282 train_later3=0.364 train_later4=0.333

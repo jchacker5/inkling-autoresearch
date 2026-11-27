@@ -1,0 +1,71 @@
+official prompt lengths: {83}
+evaluate()'s position floor: {2: 0.138, 4: 0.128, 6: 0.145, 8: 0.163, 10: 0.193}
+
+## official reasoning_eval_set (400/hop)
+rule                               h2     h4     h6     h8     h10   
+first digit                        0.138  0.128  0.105  0.150  0.193 
+last digit                         0.085  0.117  0.145  0.163  0.145 
+second digit                       0.105  0.140  0.147  0.120  0.175 
+random root (1/R)                  0.111  0.119  0.134  0.150  0.177 
+nearest digit before q's stmt      0.120  0.125  0.150  0.168  0.145 
+nearest digit after q's stmt       0.085  0.117  0.145  0.163  0.145 
+nearest digit to q's stmt          0.095  0.117  0.145  0.163  0.145 
+largest tree (plurality value)     0.015  0.493  0.840  0.985  1.000 
+deepest tree                       0.201  0.936  0.999  1.000  1.000 
+path tree of depth h (knows h)     0.834  0.993  1.000  1.000  1.000 
+roots with >=1 child               0.236  0.264  0.299  0.339  0.374 
+roots with exactly 1 child         0.390  0.405  0.470  0.518  0.566 
+root with most children            0.018  0.043  0.063  0.112  0.142 
+mean #roots R                      9.24   8.65   7.83   7.05   6.01  
+P(chain root = first root)         0.138  0.128  0.105  0.150  0.193 
+
+## fresh samples (20000/hop)
+rule                               h0     h1     h2     h4     h6     h8     h10   
+first digit                        0.107  0.107  0.109  0.121  0.132  0.146  0.178 
+last digit                         0.104  0.111  0.108  0.121  0.137  0.154  0.176 
+second digit                       0.107  0.110  0.112  0.117  0.128  0.152  0.176 
+random root (1/R)                  0.106  0.108  0.111  0.120  0.133  0.152  0.178 
+nearest digit before q's stmt      1.000  0.313  0.166  0.130  0.139  0.155  0.176 
+nearest digit after q's stmt       0.104  0.111  0.108  0.121  0.137  0.154  0.176 
+nearest digit to q's stmt          1.000  0.267  0.119  0.121  0.137  0.154  0.176 
+largest tree (plurality value)     0.000  0.000  0.017  0.480  0.846  0.984  1.000 
+deepest tree                       0.000  0.002  0.209  0.941  0.999  1.000  1.000 
+path tree of depth h (knows h)     0.193  0.478  0.835  0.995  1.000  1.000  1.000 
+roots with >=1 child               0.000  0.223  0.235  0.266  0.297  0.333  0.372 
+roots with exactly 1 child         0.008  0.370  0.387  0.424  0.467  0.511  0.553 
+root with most children            0.000  0.016  0.022  0.042  0.067  0.103  0.149 
+mean #roots R                      9.56   9.42   9.21   8.66   7.90   6.98   6.00  
+P(chain root = first root)         0.107  0.107  0.109  0.121  0.132  0.146  0.178 
+
+## partial chase: k real lookups from q, then a uniform guess among roots (fresh samples)
+h0   k0:1.000
+h1   k0:0.108 k1:1.000
+h2   k0:0.111 k1:0.111 k2:1.000
+h4   k0:0.120 k1:0.120 k2:0.120 k3:0.120 k4:1.000
+h6   k0:0.132 k1:0.132 k2:0.132 k3:0.132 k4:0.132 k5:0.132 k6:1.000
+h8   k0:0.152 k1:0.152 k2:0.152 k3:0.152 k4:0.152 k5:0.152 k6:0.152 k7:0.152 k8:1.000
+h10  k0:0.177 k1:0.177 k2:0.177 k3:0.177 k4:0.177 k5:0.177 k6:0.177 k7:0.177 k8:0.177 k9:0.177 k10:1.000
+
+## position-only learned oracle (conditional logit on root-mask features; train 6k, test 6k + official)
+h0   train 0.138  test 0.122
+h1   train 0.132  test 0.131
+h2   train 0.135  test 0.129  official 0.090
+h4   train 0.145  test 0.140  official 0.138
+h6   train 0.181  test 0.175  official 0.212
+h8   train 0.211  test 0.206  official 0.207
+h10  train 0.246  test 0.235  official 0.210
+
+## encode_prompt filler (left context before the prompt)
+align=1: prefix b'\n' digits []
+align=2: prefix b'3\n' digits [b'3']
+   h2: P(answer == filler digit 3) = 0.100
+   h4: P(answer == filler digit 3) = 0.105
+   h6: P(answer == filler digit 3) = 0.087
+   h8: P(answer == filler digit 3) = 0.102
+   h10: P(answer == filler digit 3) = 0.085
+align=4: prefix b'3\n' digits [b'3']
+   h2: P(answer == filler digit 3) = 0.100
+   h4: P(answer == filler digit 3) = 0.105
+   h6: P(answer == filler digit 3) = 0.087
+   h8: P(answer == filler digit 3) = 0.102
+   h10: P(answer == filler digit 3) = 0.085

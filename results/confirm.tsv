@@ -1,0 +1,5 @@
+lane	commit	primary	n_cand	mean_cand	sd_cand	n_base	mean_base	sd_base	t	df	p_one_sided	holm_alpha	bpb_cand	bpb_base	bpb_gate_ok	promoted
+binding	7886b3d	kappa_id	6	-0.0667	0	6	-0.0667	0	-inf	10	1	0.05	1.46982	1.46983	True	False
+recipe	91b7b8c	val_bpb	6	1.46655	7.37564e-05	6	1.46983	0.00034155	22.9814	5.46531	5.98492e-07	0.0166667	1.46655	1.46983	True	True
+depth	49e8711	val_bpb	6	1.4671	0.000200075	6	1.46983	0.00034155	16.9142	8.06996	6.87705e-08	0.0125	1.4671	1.46983	True	True
+exit	7886b3d	val_bpb	6	1.46983	0.000354255	6	1.46983	0.00034155	-0.0165924	9.98669	0.506456	0.025	1.46983	1.46983	True	False
