@@ -91,7 +91,8 @@ A candidate is only a nomination; screening at t >= 0.92 lets about 20% of null 
 1. Each lane's best candidate (largest t) is re-trained with 6 fresh seeds (100..105). 6 fresh baseline
    seeds are interleaved with them.
 2. All of these runs are scored on the **holdout** eval set (`INKLING_EVAL_SEED=99991`), which screening
-   never sees. Their ledger verdict is `holdout`.
+   never sees for the synthetic reasoning examples. The fixed text windows do not change with this seed.
+   Their ledger verdict is `holdout`; passing the text gate is not independent-corpus confirmation.
 3. Each lane gets a one-sided Welch t-test on its primary metric against the holdout baseline seeds, with
    Holm correction across lanes at family-wise alpha 0.05. A promoted lane must also pass the `val_bpb`
    gate. The results go to `results/confirm.tsv` (`uv run swarm/confirm.py` recomputes it).

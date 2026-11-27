@@ -98,23 +98,41 @@ def best_candidate(rows, lane):
 def confirm_table(rows, lanes, eval_seed, alpha=ALPHA):
     """One row per lane that has a best candidate (see FIELDS). Holdout rows: lane '<lane>-confirm' and
     BASELINE_LANE, valid, with the given eval_seed."""
-    def holdout(lane):
-        return [r for r in rows if r["lane"] == lane and r["valid"] == "True" and r.get("eval_seed") == str(eval_seed)]
+    expected = {str(seed) for seed in CONFIRM_SEEDS}
 
-    base = holdout(BASELINE_LANE)
+    def holdout(lane, finalist, commit=None):
+        if not finalist.get("harness") or not finalist.get("base"):
+            return [], False
+        rows_by_seed = {}
+        duplicates = set()
+        for r in rows:
+            seed = r.get("seed")
+            if (r["lane"] != lane or r["valid"] != "True" or r.get("eval_seed") != str(eval_seed)
+                    or seed not in expected or r.get("harness") != finalist["harness"]
+                    or r.get("base") != finalist["base"] or (commit is not None and r["commit"] != commit)):
+                continue
+            if seed in rows_by_seed:
+                duplicates.add(seed)
+            rows_by_seed[seed] = r
+        selected = [rows_by_seed[seed] for seed in sorted(rows_by_seed)]
+        complete = (set(rows_by_seed) == expected and not duplicates
+                    and len({r["commit"] for r in selected}) == 1)
+        return selected, complete
+
     out, pvals = [], {}
     for lane in lanes:
         best = best_candidate(rows, lane)
         if best is None:
             continue
         primary = best.get("primary") or "kappa_id"
-        cand = [r for r in holdout(f"{lane}-confirm") if r["commit"] == best["commit"]]
+        base, base_complete = holdout(BASELINE_LANE, best)
+        cand, cand_complete = holdout(f"{lane}-confirm", best, best["commit"])
         xc, xb = [float(r[primary]) for r in cand], [float(r[primary]) for r in base]
-        t, df, p = welch(xc, xb, PRIMARIES[primary])
+        t, df, p = welch(xc, xb, PRIMARIES[primary]) if base_complete and cand_complete else (None, None, None)
         bc = [float(r["val_bpb"]) for r in cand]
         bb = [float(r["val_bpb"]) for r in base]
         gate = bool(bc and bb) and st.mean(bc) <= st.mean(bb) + BPB_GATE
-        pvals[lane] = p
+        pvals[lane] = 1.0 if p is None else p
         out.append(dict(lane=lane, commit=best["commit"], primary=primary, n_cand=len(xc),
                         mean_cand=st.mean(xc) if xc else None, sd_cand=st.stdev(xc) if len(xc) > 1 else None,
                         n_base=len(xb), mean_base=st.mean(xb) if xb else None,
@@ -124,7 +142,7 @@ def confirm_table(rows, lanes, eval_seed, alpha=ALPHA):
     for r in out:
         a_i, rej = h[r["lane"]]
         r["holm_alpha"] = a_i
-        r["promoted"] = bool(rej and r["bpb_gate_ok"])
+        r["promoted"] = bool(r["p_one_sided"] is not None and rej and r["bpb_gate_ok"])
     return out
 
 
