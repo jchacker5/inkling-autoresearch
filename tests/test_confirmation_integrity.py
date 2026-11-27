@@ -44,3 +44,11 @@ class ConfirmationIntegrity(unittest.TestCase):
     def test_complete_clean_seed_matrix_is_scored(self):
         c, b, t = make_rows()
         self.assertTrue(self.score(c, b, t)["promoted"])
+
+    def test_different_baseline_cohort_is_excluded(self):
+        c, b, t = make_rows()
+        other = [dict(row, commit="different") for row in b]
+        result = confirm.confirm_table([c, *b, *other, *t], ["recipe"], 99991,
+                                       baseline_commit="baseline")[0]
+        self.assertTrue(result["promoted"])
+        self.assertEqual(result["n_base"], 6)

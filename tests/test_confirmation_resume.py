@@ -81,3 +81,11 @@ class ConfirmationResume(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "duplicate"):
             self.execute()
         self.assertEqual(self.training_calls, 0)
+
+    def test_baseline_revision_cannot_drift_on_resume(self):
+        with patch.object(campaign, "STATE", self.wt), patch.object(campaign.subprocess, "run") as git:
+            git.return_value.stdout = "original\n"
+            self.assertEqual(campaign.pinned_confirmation_baseline("h", "b"), "original")
+            git.return_value.stdout = "advanced\n"
+            self.assertEqual(campaign.pinned_confirmation_baseline("h", "b"), "original")
+            self.assertEqual(git.call_count, 1)

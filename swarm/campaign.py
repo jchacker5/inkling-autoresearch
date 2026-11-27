@@ -160,6 +160,23 @@ def ledger():
         return list(csv.DictReader(f, delimiter="\t"))
 
 
+def pinned_confirmation_baseline(harness, base):
+    """A resumed run must keep the original baseline even if main advanced."""
+    path = STATE / "confirmation-baseline.json"
+    if not path.exists():
+        revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+        try:
+            with path.open("x") as f:
+                json.dump(dict(commit=revision, harness=harness, base=base), f)
+        except FileExistsError:
+            pass  # Another campaign pinned the baseline first.
+    record = json.loads(path.read_text())
+    if (record["harness"], record["base"]) != (harness, base):
+        raise RuntimeError("pinned confirmation harness or base differs; use a fresh campaign state")
+    return record["commit"]
+
+
 def confirm_seed(step, lane, seed, cwd, commit, harness, base, *, desc, checkout=False,
                  primary="kappa_id", hypothesis=""):
     """A marker is a convenience, not proof that the experiment succeeded."""
@@ -347,8 +364,9 @@ def main():
         if len(contexts) != 1:
             raise RuntimeError("confirmation finalists do not share a harness and base")
         harness, base = next(iter(contexts))
-        baseline = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, check=True,
-                                  capture_output=True, text=True).stdout.strip()
+        baseline = pinned_confirmation_baseline(harness, base)
+        baseline_short = subprocess.run(["git", "rev-parse", "--short", "--verify", baseline],
+                                        cwd=ROOT, check=True, capture_output=True, text=True).stdout.strip()
         for seed in CONFIRM_SEEDS:
             confirm_seed(f"confirm-baseline-{seed}", BASELINE_LANE, seed, ROOT, baseline, harness, base,
                          desc=f"holdout baseline seed {seed}", hypothesis="confirmation reference")
@@ -359,7 +377,7 @@ def main():
                              primary=best.get("primary") or "kappa_id", hypothesis=best["desc"],
                              desc=f"confirm {lane} best {commit} seed {seed}")
     if finalists:
-        table = confirm_table(ledger(), list(finalists), HOLDOUT_EVAL_SEED)
+        table = confirm_table(ledger(), list(finalists), HOLDOUT_EVAL_SEED, baseline_commit=baseline_short)
         write_tsv(table, ROOT / "results" / "confirm.tsv")
         for r in table:
             log(f"confirm {r['lane']}: p={r['p_one_sided']} holm_alpha={r['holm_alpha']} promoted={r['promoted']}")

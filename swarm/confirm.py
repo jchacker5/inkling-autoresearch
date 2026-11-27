@@ -95,7 +95,7 @@ def best_candidate(rows, lane):
     return max(c, key=lambda r: float(r.get("t_primary") or "-inf")) if c else None
 
 
-def confirm_table(rows, lanes, eval_seed, alpha=ALPHA):
+def confirm_table(rows, lanes, eval_seed, alpha=ALPHA, *, baseline_commit=None):
     """One row per lane that has a best candidate (see FIELDS). Holdout rows: lane '<lane>-confirm' and
     BASELINE_LANE, valid, with the given eval_seed."""
     expected = {str(seed) for seed in CONFIRM_SEEDS}
@@ -125,7 +125,7 @@ def confirm_table(rows, lanes, eval_seed, alpha=ALPHA):
         if best is None:
             continue
         primary = best.get("primary") or "kappa_id"
-        base, base_complete = holdout(BASELINE_LANE, best)
+        base, base_complete = holdout(BASELINE_LANE, best, baseline_commit)
         cand, cand_complete = holdout(f"{lane}-confirm", best, best["commit"])
         xc, xb = [float(r[primary]) for r in cand], [float(r[primary]) for r in base]
         t, df, p = welch(xc, xb, PRIMARIES[primary]) if base_complete and cand_complete else (None, None, None)
