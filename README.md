@@ -19,20 +19,17 @@ fairly. "Inkling" is the working name of the model family.
 The harness, model switches, swarm runner and tests (106, CPU only) are in place, and the first full campaign
 has run on one M4 with 32 GB. The results so far are mixed, and the main one is negative for looping.
 
-**1. At matched parameters and wall clock, the non-looped model wins.** Each row is trained from scratch for 2 hours on
-task-v4 data, with 7.3M unique parameters (`swarm/campaign.py`, `results/eval-*-2h.json`):
+**1. At matched parameters and wall clock, the non-looped model wins—at matched steps, the looped model wins.** Each row below trains 7.3M unique parameters from scratch on task-v4 data (`swarm/campaign.py`, `results/eval-*.json`):
 
 | model | steps | `kappa_id` | `kappa_ood` | `val_bpb` |
 |---|---|---|---|---|
-| non-looped, 4 layers (`LOOPS=1`) | 11,300 | **.73** | **.21** | **1.642** |
-| chunked looped core (`CHUNK=4`) | 11,539 | .31 | -.05 | 1.723 |
-| looped, 4 loops | 4,765 | 0 (floor) | 0 | 1.713 |
-| looped, 4 loops, no answer weighting | 4,546 | 0 | 0 | 1.712 |
+| non-looped, 4 layers (`LOOPS=1`, 2 h) | 11,300 | .728 | .213 | 1.642 |
+| chunked looped core (`CHUNK=4`, 2 h) | 11,539 | .31 | -.05 | 1.723 |
+| looped, 4 loops (2 h) | 4,765 | 0 (floor) | 0 | 1.713 |
+| looped, 4 loops, no answer weighting (2 h) | 4,546 | 0 | 0 | 1.712 |
+| **looped, 4 loops, stretched LR (4.75 h)** | **9,815** | **.913** | **.283** | **1.635** |
 
-A looped step costs about 2.5 times a non-looped one, so in the same time the looped model saw 2.4 times fewer
-tokens and had not yet learned to retrieve. The comparison is therefore matched on compute, not on steps. The
-looping literature makes the matched-step comparison, and a looped run at 11,300 steps with the same per-step LR
-schedule is in progress.
+A looped step costs about 2.5 times a non-looped one, so in 2 hours the looped model saw 2.4 times fewer tokens and had not yet reached the multi-hop phase transition. When allowed to run on the same per-step LR schedule (`looped-matched`, `results/eval-looped-matched.json`), it beat `control-4L` in **1,485 fewer steps** on `val_bpb` (`1.635` vs `1.642`), `kappa_id` (`.913` vs `.728`; hops 2/4/6 = `.970/.960/.825` vs `.960/.770/.505`), and `kappa_ood` (`.283` vs `.213`). At 8 test-time loops (`2x` training loops), OOD `reason_ood` jumped further from `.328` to **`.505`** (`kappa_ood = .472`), while `val_bpb` rose to `1.709`.
 
 **2. Multi-hop composition appears suddenly, and only after long training.** In a from-scratch chain task with
 equal-length chains (`swarm/sanity_lookup.py --hops 1 --nv 8`, so a model that ignores the question scores .25):
@@ -184,8 +181,7 @@ leaves a warm-started model unchanged at init.
 
 Each has a GitHub issue with details.
 
-1. **Looping at matched steps.** The matched-compute control favours the non-looped model (Status 1). Does looping
-   win at matched steps and tokens, and at what step does the looped model learn retrieval?
+1. **Looping at matched steps ([#5](https://github.com/jchacker5/inkling-autoresearch/issues/5)).** `looped-matched` (9,815 steps) beat `control-4L` (11,300 steps) on `kappa_id` (`.913` vs `.728`), `kappa_ood` (`.283` vs `.213`), and `val_bpb` (`1.635` vs `1.642`), and reached `reason_ood = .505` at 8 test-time loops. Remaining: exact 11,300-step check or closing the throughput gap.
 2. **A multi-hop curriculum.** Composition emerges suddenly and late (Status 2). Would training on one-step chains
    first, then deeper ones, bring it forward?
 3. **Sleep and dream on task v4.** The switches are implemented and tested but have not been measured.
