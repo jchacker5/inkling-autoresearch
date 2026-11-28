@@ -6,7 +6,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 import pytest
-from mlx.utils import tree_flatten
+from mlx.utils import tree_flatten, tree_map
 
 import prepare as P
 
@@ -31,6 +31,7 @@ CASES = {
     "canon4_chunk4": {"CANON": 4, "CHUNK": 4},
     "sleep16": {"SLEEP": 16},
     "sleep16_dream_canon": {"SLEEP": 16, "DREAM": 0.5, "CANON": 4},
+    "bf16": {"BF16": True},
     "combined": {"DEPTH_ATTN": 2, "HALTING": True, "LOOP_EMBED": True, "KV_SHARE": True},
 }
 # Switches that add parameters but must not change the function at init, so warm-starting is safe.
@@ -140,12 +141,13 @@ def test_loop_consistency_loss():
 def test_chunk_handles_ragged_length_and_shrinks_cache(k):
     """Lengths not divisible by K work (right padding never leaks backwards) and the core KV per byte drops."""
     plain = build()[1].kv_bytes_per_token()
-    _, m = build(CHUNK=k)
+    train, m = build(CHUNK=k)
     assert m.kv_bytes_per_token() < plain
     x = batch(T=47)[:, :-1]
     full = m(x)
     assert full.shape == (2, 47, 256)
-    assert mx.abs(m(x[:, :30]) - full[:, :30]).max().item() < 1e-4
+    tol = 5e-2 if train.BF16 else 1e-4
+    assert mx.abs(m(x[:, :30]) - full[:, :30]).max().item() < tol
 
 
 def test_chunk_readouts_equal_truncated_runs():
@@ -200,3 +202,24 @@ def test_sleep_wake_reads_only_earlier_windows():
     ref = m.forward(x, loops=1, return_states=True)[0]       # window 0 has nothing slept: one plain pass
     assert mx.abs(wake[:, :16] - ref[:, :16]).max().item() < 1e-4
     assert mx.abs(wake[:, 16:] - ref[:, 16:]).max().item() > 1e-3
+
+
+def test_bf16_uses_bfloat16_params_and_fp32_master_weights(tmp_path):
+    """BF16 casts model weights to bfloat16, loads fp32 checkpoints cleanly, and keeps fp32 master/Adam state."""
+    train, base = build()
+    path = str(tmp_path / "base.safetensors")
+    base.save_weights(path)
+    train, m = build(BF16=True)
+    assert all(v.dtype == mx.bfloat16 for _, v in tree_flatten(m.parameters()))
+    train.load_base(m, path)
+    assert all(v.dtype == mx.bfloat16 for _, v in tree_flatten(m.parameters()))
+    opt, _ = train.make_optimizer(m, "R", 1e-3, set())
+    for k, v in tree_flatten(opt.state):
+        if k.endswith(".master") or k.endswith(".m") or k.endswith(".v"):
+            assert v.dtype == mx.float32, (k, v.dtype)
+    x = batch(B=2, T=32)
+    (loss, _), grads = nn.value_and_grad(m, lambda b: m.loss(b, 2))(x)
+    grads = tree_map(lambda g: g.astype(mx.float32), grads)
+    opt.update(m, grads)
+    mx.eval(m.parameters(), opt.state)
+    assert all(v.dtype == mx.bfloat16 for _, v in tree_flatten(m.parameters()))

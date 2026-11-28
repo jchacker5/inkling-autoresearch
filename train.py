@@ -25,7 +25,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
 import numpy as np
-from mlx.utils import tree_flatten
+from mlx.utils import tree_flatten, tree_map
 
 from prepare import BASE_CKPT, BASE_NAME, REASONING_MIX, SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, Batches, evaluate
 
@@ -94,7 +94,12 @@ R_LR_NEW_VEC = 1e-2                # new 1-D tensors: gates, scales, biases
 R_LR_CORE = None                   # base tensors of the shared looped core (None: same as R_LR)
 R_WARMUP, R_DECAY_FRAC = 10, 1.0
 R_INTERP = 0.5                     # <1: after training, base tensors become base + R_INTERP*(trained - base) (WiSE-FT)
-DTYPE = mx.float32                 # activation dtype; params are fp32 (bf16 only helps if params are cast too)
+BF16 = False                       # True: bf16 weights/activations, fp32 master weights (+57% tok/s, -49% memory at 400 steps; #8). Off until a long run matches fp32
+DTYPE = mx.float32                 # activation dtype when BF16 is False
+
+
+def act_dtype():
+    return mx.bfloat16 if BF16 else DTYPE
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +248,8 @@ class Inkling(nn.Module):
             self.halt = nn.Linear(d, 1)
             self.halt.bias = mx.array([-2.0])   # start by mostly continuing
         self.mean_loops_per_token = float(LOOPS)
+        if BF16:
+            self.set_dtype(mx.bfloat16)
 
     def kv_bytes_per_token(self, loops=None):
         """KV cache bytes per byte of context at `loops` recurrent iterations (default: the trained count)."""
@@ -353,7 +360,7 @@ class Inkling(nn.Module):
         if CHUNK > 1 or HALTING or KV_SHARE or EXIT_TAU > 0 or DEPTH_ATTN or HISTORY != "none" or LOOP_EMBED:
             raise ValueError("SLEEP is implemented for the plain looped core only")
         loops = loops or self.train_loops
-        e = self.emb(x).astype(DTYPE)
+        e = self.emb(x).astype(act_dtype())
         for blk in self.prelude:                       # the prelude does not loop: identical in both streams
             e, _ = blk(e)
         core_kv = []
@@ -382,7 +389,7 @@ class Inkling(nn.Module):
             wake, _, expected = self.sleep_wake(x, loops)
             return wake, expected
         loops = loops or self.train_loops
-        h = self.emb(x).astype(DTYPE)
+        h = self.emb(x).astype(act_dtype())
         for blk in self.prelude:
             h, _ = blk(h)
         byte = h
@@ -447,7 +454,7 @@ def load_base(model, path):
     bad = [k for k, v in base.items() if k in own and own[k].shape != v.shape]
     if bad:
         raise SystemExit(f"FAIL: base checkpoint shape mismatch for {bad[:5]}; keep the backbone shape or set INIT_FROM_BASE=False")
-    model.load_weights([(k, v) for k, v in base.items() if k in own], strict=False)
+    model.load_weights([(k, v.astype(own[k].dtype)) for k, v in base.items() if k in own], strict=False)
     new = sorted(k for k in own if k not in base)
     print(f"warm-started from {path}; {len(new)} new tensors at init: {new[:8]}")
     return set(new)
@@ -469,14 +476,32 @@ def param_groups(new_keys):
             ("base", R_LR, WEIGHT_DECAY, None)]
 
 
+class MasterAdamW(optim.AdamW):
+    """AdamW keeping fp32 master weights and moments in optimizer state for low-precision parameters."""
+
+    def init_single(self, parameter: mx.array, state: dict):
+        p32 = parameter.astype(mx.float32)
+        super().init_single(p32, state)
+        state["master"] = p32
+
+    def apply_single(self, gradient: mx.array, parameter: mx.array, state: dict):
+        if "master" not in state:
+            return super().apply_single(gradient.astype(mx.float32), parameter, state)
+        master = super().apply_single(gradient.astype(mx.float32), state["master"], state)
+        state["master"] = master
+        return master.astype(parameter.dtype)
+
+
 def make_optimizer(model, recipe, lr_peak, new_keys=()):
     """Returns (optimizer, [(sub-optimizer, peak lr)]). The caller sets each sub-optimizer's LR every step
     (MultiOptimizer's own learning_rate setter would give every group the same LR)."""
+    opt_cls = MasterAdamW if BF16 else optim.AdamW
     if recipe != "R":
-        opt = optim.AdamW(learning_rate=lr_peak, weight_decay=WEIGHT_DECAY, betas=[0.9, 0.95])
+        opt = opt_cls(learning_rate=lr_peak, weight_decay=WEIGHT_DECAY, betas=[0.9, 0.95])
+        opt.init(model.trainable_parameters())
         return opt, [(opt, lr_peak)]
     groups = param_groups(new_keys)
-    subs = [optim.AdamW(learning_rate=lr, weight_decay=wd, betas=[0.9, 0.95]) for _, lr, wd, _ in groups]
+    subs = [opt_cls(learning_rate=lr, weight_decay=wd, betas=[0.9, 0.95]) for _, lr, wd, _ in groups]
     opt = optim.MultiOptimizer(subs, filters=[f for _, _, _, f in groups[:-1]])
     opt.init(model.trainable_parameters())          # before mx.compile captures opt.state
     return opt, [(o, lr) for o, (_, lr, _, _) in zip(subs, groups)]
@@ -500,6 +525,8 @@ def train(model, budget, lr_peak, seed=SEED, log_every=50, on_tick=None, stop_af
         if (k, c) not in steps_fns:
             def step(batch):
                 (loss, ce), grads = grad_fn(batch, k, c)
+                if BF16:
+                    grads = tree_map(lambda g: g.astype(mx.float32), grads)
                 grads, _ = optim.clip_grad_norm(grads, 1.0)
                 opt.update(model, grads)
                 return loss, ce
@@ -551,10 +578,10 @@ def main():
             raise SystemExit(f"FAIL: {BASE_CKPT} missing; run `uv run pretrain_base.py` once (or set INIT_FROM_BASE=False)")
         new_keys = load_base(model, BASE_CKPT)
     recipe = RECIPE if INIT_FROM_BASE else "legacy"    # recipe R is defined for warm starts only
-    base0 = {k: mx.array(v) for k, v in tree_flatten(model.parameters()) if k not in new_keys}
+    base0 = {k: v.astype(mx.float32) for k, v in tree_flatten(model.parameters()) if k not in new_keys}
     info = train(model, TIME_BUDGET, LR, recipe=recipe, new_keys=new_keys)
     if INIT_FROM_BASE and R_INTERP < 1:
-        model.load_weights([(k, base0[k] + R_INTERP * (v - base0[k]))
+        model.load_weights([(k, (base0[k] + R_INTERP * (v.astype(mx.float32) - base0[k])).astype(v.dtype))
                             for k, v in tree_flatten(model.parameters()) if k in base0], strict=False)
         mx.eval(model.parameters())
     info["init_from_base"] = INIT_FROM_BASE

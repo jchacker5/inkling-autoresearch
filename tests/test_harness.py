@@ -174,14 +174,30 @@ def test_train_runs_with_each_recipe(recipe, tmp_path, monkeypatch):
     train, m = build(LOOP_EMBED=True, BATCH_SIZE=2)
     monkeypatch.setattr(train, "Batches", _FakeBatches)
     new = train.load_base(m, path)
-    before = {k: np.array(v) for k, v in tree_flatten(m.parameters())}
+    before = {k: np.array(v.astype(mx.float32)) for k, v in tree_flatten(m.parameters())}
     seen = []
     info = train.train(m, 0.3, 1e-3, log_every=10**6, recipe=recipe, new_keys=new,
                        on_tick=lambda s, t: seen.append(s))
     assert info["recipe"] == recipe and info["steps"] >= 3
     after = dict(tree_flatten(m.parameters()))
-    assert np.abs(np.array(after["loop_proj.weight"]) - before["loop_proj.weight"]).max() > 0
-    assert np.abs(np.array(after["head.weight"]) - before["head.weight"]).max() > 0
+    assert np.abs(np.array(after["loop_proj.weight"].astype(mx.float32)) - before["loop_proj.weight"]).max() > 0
+    assert np.abs(np.array(after["head.weight"].astype(mx.float32)) - before["head.weight"]).max() > 0
+
+
+@pytest.mark.parametrize("recipe", ["R", "legacy"])
+def test_train_runs_with_bf16_master_weights(recipe, tmp_path, monkeypatch):
+    train, base = build()
+    path = str(tmp_path / "base.safetensors")
+    base.save_weights(path)
+    train, m = build(BF16=True, LOOP_EMBED=True, BATCH_SIZE=2)
+    monkeypatch.setattr(train, "Batches", _FakeBatches)
+    new = train.load_base(m, path) if recipe == "R" else set()
+    before = {k: np.array(v.astype(mx.float32)) for k, v in tree_flatten(m.parameters())}
+    info = train.train(m, 0.3, 1e-3, log_every=10**6, recipe=recipe, new_keys=new)
+    assert info["steps"] >= 2
+    after = dict(tree_flatten(m.parameters()))
+    assert all(v.dtype == mx.bfloat16 for v in after.values())
+    assert np.abs(np.array(after["head.weight"].astype(mx.float32)) - before["head.weight"]).max() > 0
 
 
 def test_pretrain_base_keeps_the_legacy_recipe():
