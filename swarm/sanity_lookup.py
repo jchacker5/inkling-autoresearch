@@ -75,6 +75,8 @@ def rows(rng, B, L, nv, hops=None):
     out = np.zeros((B, L), np.uint8)
     for b in range(B):
         buf = np.concatenate([line(rng, nv, hops=hops) for _ in range(L // (8 * nv) + 2)])
+        while len(buf) < L + 8 * nv:          # shorter lines (early curriculum stages) need more of them
+            buf = np.concatenate([buf, line(rng, nv, hops=hops)])
         s = rng.integers(0, 8 * nv)
         out[b] = buf[s:s + L]
     return out
