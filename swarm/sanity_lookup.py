@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import mlx.core as mx  # noqa: E402
 import mlx.nn as nn  # noqa: E402
 import mlx.optimizers as optim  # noqa: E402
+from mlx.utils import tree_map  # noqa: E402
 
 import pretrain_base as PB  # noqa: E402
 import train as T  # noqa: E402
@@ -104,7 +105,8 @@ def main():
     mx.random.seed(0)
     model = T.Inkling()
     mx.eval(model.parameters())
-    opt = optim.AdamW(learning_rate=a.lr, weight_decay=a.wd, betas=[0.9, 0.95])
+    opt = (T.MasterAdamW if T.BF16 else optim.AdamW)(learning_rate=a.lr, weight_decay=a.wd, betas=[0.9, 0.95])
+    opt.init(model.trainable_parameters())       # before mx.compile captures opt.state (MasterAdamW's fp32 masters)
     rng, erng = np.random.default_rng(0), np.random.default_rng(99)
 
     def loss_fn(x, w):
@@ -118,6 +120,8 @@ def main():
     @partial(mx.compile, inputs=state, outputs=state)
     def step(x, w):
         loss, g = vg(x, w)
+        if T.BF16:
+            g = tree_map(lambda t: t.astype(mx.float32), g)
         g, _ = optim.clip_grad_norm(g, 1.0)
         opt.update(model, g)
         return loss
