@@ -60,9 +60,10 @@ def chain_line(rng, nv, hops):
     return np.array([10] + st + qs, np.uint8), ds
 
 
-def line(rng, nv):
-    if HOPS > 0:
-        return chain_line(rng, nv, HOPS)[0]
+def line(rng, nv, hops=None):
+    h = HOPS if hops is None else hops
+    if h > 0:
+        return chain_line(rng, nv, h)[0]
     vs = rng.choice(LET, nv, replace=False)
     ds = rng.integers(48, 58, nv).astype(np.uint8)
     q = rng.integers(0, nv, nv) if WITH_REPLACEMENT else rng.permutation(nv)
@@ -71,10 +72,12 @@ def line(rng, nv):
     return np.concatenate([[10], st, qs]).astype(np.uint8)
 
 
-def rows(rng, B, L, nv):
+def rows(rng, B, L, nv, hops=None):
     out = np.zeros((B, L), np.uint8)
     for b in range(B):
-        buf = np.concatenate([line(rng, nv) for _ in range(L // (8 * nv) + 2)])
+        buf = np.concatenate([line(rng, nv, hops=hops) for _ in range(L // (8 * nv) + 2)])
+        while len(buf) < L + 8 * nv:          # shorter lines (early curriculum stages) need more of them
+            buf = np.concatenate([buf, line(rng, nv, hops=hops)])
         s = rng.integers(0, 8 * nv)
         out[b] = buf[s:s + L]
     return out
@@ -97,6 +100,8 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--wd", type=float, default=0.1)
     ap.add_argument("--hops", type=int, default=0, help="chain depth (0 = pure lookup)")
+    ap.add_argument("--curriculum", action="store_true", help="stage hops 0..HOPS, advancing at --curriculum-thresh")
+    ap.add_argument("--curriculum-thresh", type=float, default=0.90, help="eval accuracy at current depth to advance")
     ap.add_argument("set", nargs="*")
     a = ap.parse_args()
     global HOPS
@@ -141,8 +146,9 @@ def main():
         ex = rows(erng, 64, a.len, a.nv)
         em = answer_mask(ex)
     t0, i = time.time(), 0
+    cur_hops = 0 if a.curriculum else HOPS
     while time.time() - t0 < a.minutes * 60:
-        x = rows(rng, 32, a.len + 1, a.nv)
+        x = rows(rng, 32, a.len + 1, a.nv, hops=cur_hops)
         am = answer_mask(x)
         w = np.where(am, 10.0, 1.0).astype(np.float32)
         opt.learning_rate = a.lr * min(1.0, (i + 1) / 100)
@@ -157,7 +163,12 @@ def main():
             if HOPS > 0:
                 ok = p == ex[:, 1:]
                 by = " " + " ".join(f"h{d}={ok[edepth == d].mean():.3f}" for d in range(HOPS + 1) if (edepth == d).any())
-            print(f"step {i:5d} t {time.time()-t0:5.0f}s loss {loss.item():.3f} answer_acc {acc:.3f}{by}", flush=True)
+                if a.curriculum and cur_hops < HOPS and (edepth == cur_hops).any():
+                    cur_acc = ok[edepth == cur_hops].mean()
+                    if cur_acc >= a.curriculum_thresh:
+                        print(f"CURRICULUM advance {cur_hops} -> {cur_hops + 1} at step {i} (h{cur_hops}={cur_acc:.3f})", flush=True)
+                        cur_hops += 1
+            print(f"step {i:5d} t {time.time()-t0:5.0f}s loss {loss.item():.3f} answer_acc {acc:.3f}{by} cur_hops={cur_hops}", flush=True)
         i += 1
 
 

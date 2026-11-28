@@ -17,7 +17,7 @@ fairly. "Inkling" is the working name of the model family.
 ## Status (2026-11-27)
 
 The harness, model switches, swarm runner and tests (106, CPU only) are in place, and the first full campaign
-has run on one M4 with 32 GB. The results so far are mixed, and the main one is negative for looping.
+has run on one M4 with 32 GB. At matched wall clock the non-looped model wins; at matched steps the looped model wins (Status 1).
 
 **1. At matched parameters and wall clock, the non-looped model wins—at matched steps, the looped model wins.** Each row below trains 7.3M unique parameters from scratch on task-v4 data (`swarm/campaign.py`, `results/eval-*.json`):
 
@@ -42,6 +42,11 @@ equal-length chains (`swarm/sanity_lookup.py --hops 1 --nv 8`, so a model that i
 
 With 1 loop instead of 4, direct lookup never formed in 7,500 steps when the context also held pointer
 statements (`results/multihop-*.txt`).
+
+A curriculum brings the transition forward (`--curriculum`: train on direct lookups until they pass .90, then on
+one-step chains; `results/multihop-h1n8-loops4-curriculum.txt`, one seed). Lookup passed .90 at step 1,000, and
+one-step chains reached .71 at step 1,500, .87 at 1,750, .95 at 2,250 and 1.00 by 5,500, against .75 at about
+step 6,250 without it.
 
 **3. The 5-minute warm-start swarm found only small text gains.** 4 lanes ran on the `base-v4` checkpoint, and
 each lane's best run was rerun with 6 fresh training seeds (Welch test with Holm correction, `results/confirm.tsv`).
