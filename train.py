@@ -94,7 +94,7 @@ R_LR_NEW_VEC = 1e-2                # new 1-D tensors: gates, scales, biases
 R_LR_CORE = None                   # base tensors of the shared looped core (None: same as R_LR)
 R_WARMUP, R_DECAY_FRAC = 10, 1.0
 R_INTERP = 0.5                     # <1: after training, base tensors become base + R_INTERP*(trained - base) (WiSE-FT)
-BF16 = True                        # True: cast model weights and activations to bfloat16 with fp32 master weights
+BF16 = False                       # True: bf16 weights/activations, fp32 master weights (+57% tok/s, -49% memory at 400 steps; #8). Off until a long run matches fp32
 DTYPE = mx.float32                 # activation dtype when BF16 is False
 
 
